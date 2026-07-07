@@ -30,6 +30,7 @@ MAX_FILE_SIZE_BYTES = MAX_FILE_SIZE_MB * 1024 * 1024
 UPLOAD_TIMEOUT_SECONDS = int(os.getenv("UPLOAD_TIMEOUT_SECONDS", "180"))
 STORAGE_CHAT_ID = os.getenv("STORAGE_CHAT_ID", "").strip()
 INLINE_PREPARE_WAIT_SECONDS = int(os.getenv("INLINE_PREPARE_WAIT_SECONDS", "8"))
+INLINE_CACHE_VERSION = "2"
 INLINE_CACHE_FILE = Path(os.getenv("INLINE_CACHE_FILE", str(BASE_DIR / ".inline_cache.json"))).expanduser()
 if not INLINE_CACHE_FILE.is_absolute():
     INLINE_CACHE_FILE = BASE_DIR / INLINE_CACHE_FILE
@@ -59,7 +60,7 @@ def normalize_reel_url(url: str) -> str:
 
 
 def inline_result_id(url: str) -> str:
-    return hashlib.sha256(normalize_reel_url(url).encode("utf-8")).hexdigest()[:32]
+    return hashlib.sha256(f"{INLINE_CACHE_VERSION}:{normalize_reel_url(url)}".encode("utf-8")).hexdigest()[:32]
 
 
 def load_inline_cache() -> dict[str, dict[str, str]]:
@@ -67,7 +68,10 @@ def load_inline_cache() -> dict[str, dict[str, str]]:
         return {}
 
     try:
-        return json.loads(INLINE_CACHE_FILE.read_text(encoding="utf-8"))
+        content = INLINE_CACHE_FILE.read_text(encoding="utf-8")
+        if not content.strip():
+            return {}
+        return json.loads(content)
     except (OSError, json.JSONDecodeError):
         logger.exception("Failed to read inline cache")
         return {}
@@ -81,11 +85,16 @@ def save_inline_cache(cache: dict[str, dict[str, str]]) -> None:
 
 
 def get_cached_inline_result(url: str) -> Optional[dict[str, str]]:
-    return load_inline_cache().get(normalize_reel_url(url))
+    cached_result = load_inline_cache().get(normalize_reel_url(url))
+    if cached_result and cached_result.get("version") == INLINE_CACHE_VERSION:
+        return cached_result
+
+    return None
 
 
 def save_cached_inline_result(url: str, cached_result: dict[str, str]) -> None:
     cache = load_inline_cache()
+    cached_result["version"] = INLINE_CACHE_VERSION
     cache[normalize_reel_url(url)] = cached_result
     save_inline_cache(cache)
 
@@ -256,6 +265,13 @@ def download_video(url: str, download_dir: Path) -> Tuple[Path, str]:
         filename = ydl.prepare_filename(info)
 
     video_path = Path(filename)
+    requested_downloads = info.get("requested_downloads") or []
+    for requested_download in requested_downloads:
+        filepath = requested_download.get("filepath") or requested_download.get("_filename")
+        if filepath and Path(filepath).exists():
+            video_path = Path(filepath)
+            break
+
     if not video_path.exists():
         candidates = sorted(download_dir.glob("*"), key=lambda item: item.stat().st_size, reverse=True)
         if not candidates:
