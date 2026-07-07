@@ -132,6 +132,8 @@ INSTAGRAM_COOKIES_B64
 [Convert]::ToBase64String([IO.File]::ReadAllBytes("C:\path\to\instagram_cookies.txt"))
 ```
 
+Pipeline создаст `cookies/instagram_cookies.txt` на сервере с правами на чтение для контейнера. Сам файл не хранится в Git и не попадает в Docker-образ.
+
 Опциональные repository variables:
 
 ```text

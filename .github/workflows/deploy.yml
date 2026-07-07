@@ -86,7 +86,7 @@ jobs:
             COOKIES_FILE_VALUE=""
             if [ -n "$INSTAGRAM_COOKIES_B64" ]; then
               echo "$INSTAGRAM_COOKIES_B64" | base64 -d > cookies/instagram_cookies.txt
-              chmod 600 cookies/instagram_cookies.txt
+              chmod 644 cookies/instagram_cookies.txt
               COOKIES_FILE_VALUE="/app/cookies/instagram_cookies.txt"
             fi
 
