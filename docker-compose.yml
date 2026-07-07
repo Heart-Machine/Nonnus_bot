@@ -4,6 +4,7 @@ services:
     image: ${IMAGE:-instagram-reels-bot:local}
     container_name: instagram-reels-bot
     restart: unless-stopped
+    user: "${APP_UID:-10001}:${APP_GID:-10001}"
     env_file:
       - .env
     volumes:

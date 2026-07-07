@@ -151,10 +151,10 @@ $HOME/instagram-reels-bot
 
 На сервере должны быть установлены Docker и Docker Compose plugin.
 
-Если контейнер не может записать inline-кэш в `/app/data/inline_cache.json`, выставьте владельца data-директории под UID контейнерного пользователя:
+Если контейнер не может записать inline-кэш в `/app/data/inline_cache.json`, проверьте владельца data-директории. При deploy через GitHub Actions контейнер запускается с UID/GID SSH-пользователя. Для `DEPLOY_PATH=/opt/nonnus_bot` можно исправить так:
 
 ```bash
-sudo chown -R 10001:10001 /opt/nonnus_bot/data
+sudo chown -R YOUR_SSH_USER:YOUR_SSH_USER /opt/nonnus_bot/data
 ```
 
 ## Как это работает
