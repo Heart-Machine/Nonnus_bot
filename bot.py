@@ -233,6 +233,12 @@ def build_reel_caption(info: dict[str, Any], fallback_url: str) -> str:
 
 def download_video(url: str, download_dir: Path) -> Tuple[Path, str]:
     output_template = str(download_dir / "%(id)s.%(ext)s")
+    cookiefile = None
+    if COOKIES_FILE:
+        source_cookiefile = Path(COOKIES_FILE)
+        cookiefile = download_dir / source_cookiefile.name
+        shutil.copyfile(source_cookiefile, cookiefile)
+
     ydl_opts = {
         "outtmpl": output_template,
         "format": "best[ext=mp4]/best",
@@ -242,8 +248,8 @@ def download_video(url: str, download_dir: Path) -> Tuple[Path, str]:
         "merge_output_format": "mp4",
     }
 
-    if COOKIES_FILE:
-        ydl_opts["cookiefile"] = COOKIES_FILE
+    if cookiefile:
+        ydl_opts["cookiefile"] = str(cookiefile)
 
     with YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(url, download=True)
