@@ -4,5 +4,6 @@
 __pycache__/
 *.pyc
 *.log
+.inline_cache.json
 downloads/
 cookies/
