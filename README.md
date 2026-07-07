@@ -151,6 +151,12 @@ $HOME/instagram-reels-bot
 
 На сервере должны быть установлены Docker и Docker Compose plugin.
 
+Если контейнер не может записать inline-кэш в `/app/data/inline_cache.json`, выставьте владельца data-директории под UID контейнерного пользователя:
+
+```bash
+sudo chown -R 10001:10001 /opt/nonnus_bot/data
+```
+
 ## Как это работает
 
 - `python-telegram-bot` принимает сообщения и отправляет файл в Telegram.

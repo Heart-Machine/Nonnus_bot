@@ -78,6 +78,7 @@ jobs:
             APP_DIR="${DEPLOY_PATH:-$HOME/instagram-reels-bot}"
             mkdir -p "$APP_DIR/data" "$APP_DIR/cookies"
             cd "$APP_DIR"
+            chown -R 10001:10001 data
 
             if [ -n "$GHCR_TOKEN" ]; then
               echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USERNAME" --password-stdin
