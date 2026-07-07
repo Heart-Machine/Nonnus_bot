@@ -90,29 +90,29 @@ jobs:
               COOKIES_FILE_VALUE="/app/cookies/instagram_cookies.txt"
             fi
 
-            cat > .env <<EOF
-            BOT_TOKEN=$BOT_TOKEN
-            COOKIES_FILE=$COOKIES_FILE_VALUE
-            MAX_FILE_SIZE_MB=$MAX_FILE_SIZE_MB
-            UPLOAD_TIMEOUT_SECONDS=$UPLOAD_TIMEOUT_SECONDS
-            STORAGE_CHAT_ID=$STORAGE_CHAT_ID
-            INLINE_PREPARE_WAIT_SECONDS=$INLINE_PREPARE_WAIT_SECONDS
-            INLINE_CACHE_FILE=/app/data/inline_cache.json
-            EOF
+            {
+              printf 'BOT_TOKEN=%s\n' "$BOT_TOKEN"
+              printf 'COOKIES_FILE=%s\n' "$COOKIES_FILE_VALUE"
+              printf 'MAX_FILE_SIZE_MB=%s\n' "$MAX_FILE_SIZE_MB"
+              printf 'UPLOAD_TIMEOUT_SECONDS=%s\n' "$UPLOAD_TIMEOUT_SECONDS"
+              printf 'STORAGE_CHAT_ID=%s\n' "$STORAGE_CHAT_ID"
+              printf 'INLINE_PREPARE_WAIT_SECONDS=%s\n' "$INLINE_PREPARE_WAIT_SECONDS"
+              printf 'INLINE_CACHE_FILE=%s\n' "/app/data/inline_cache.json"
+            } > .env
             chmod 600 .env
 
-            cat > docker-compose.yml <<EOF
-            services:
-              instagram-reels-bot:
-                image: $IMAGE
-                container_name: instagram-reels-bot
-                restart: unless-stopped
-                env_file:
-                  - .env
-                volumes:
-                  - ./data:/app/data
-                  - ./cookies:/app/cookies:ro
-            EOF
+            {
+              printf 'services:\n'
+              printf '  instagram-reels-bot:\n'
+              printf '    image: %s\n' "$IMAGE"
+              printf '    container_name: instagram-reels-bot\n'
+              printf '    restart: unless-stopped\n'
+              printf '    env_file:\n'
+              printf '      - .env\n'
+              printf '    volumes:\n'
+              printf '      - ./data:/app/data\n'
+              printf '      - ./cookies:/app/cookies:ro\n'
+            } > docker-compose.yml
 
             docker compose pull
             docker compose up -d
