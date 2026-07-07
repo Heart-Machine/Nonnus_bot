@@ -40,6 +40,14 @@ python bot.py
 https://www.instagram.com/reel/XXXXXXXXXXX/
 ```
 
+В группе или общем чате добавьте бота и тегните его вместе со ссылкой:
+
+```text
+@your_bot_username https://www.instagram.com/reel/XXXXXXXXXXX/
+```
+
+В группах бот отвечает только на сообщения, где есть его `@username`. Если у бота включен BotFather Privacy Mode, это нормальный режим: Telegram все равно доставляет боту сообщения с упоминанием.
+
 ## Как это работает
 
 - `python-telegram-bot` принимает сообщения и отправляет файл в Telegram.

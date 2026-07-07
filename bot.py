@@ -43,6 +43,32 @@ def find_instagram_url(text: str) -> Optional[str]:
     return match.group(0) if match else None
 
 
+async def get_bot_username(context: ContextTypes.DEFAULT_TYPE) -> str:
+    cached_username = context.application.bot_data.get("bot_username")
+    if cached_username:
+        return str(cached_username)
+
+    bot_user = await context.bot.get_me()
+    username = bot_user.username or ""
+    context.application.bot_data["bot_username"] = username
+    return username
+
+
+async def is_message_addressed_to_bot(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    message = update.message
+    if message is None:
+        return False
+
+    if message.chat.type == "private":
+        return True
+
+    username = await get_bot_username(context)
+    if not username:
+        return False
+
+    return re.search(rf"@{re.escape(username)}(?![A-Za-z0-9_])", message.text or "", re.IGNORECASE) is not None
+
+
 def normalize_instagram_username(value: Any) -> Optional[str]:
     if value is None:
         return None
@@ -145,6 +171,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     message = update.message
     if message is None or message.text is None:
+        return
+
+    if not await is_message_addressed_to_bot(update, context):
         return
 
     url = find_instagram_url(message.text)
