@@ -83,6 +83,72 @@ STORAGE_CHAT_ID=-1001234567890
 
 Первый inline-запрос для нового Reel может занять больше времени: бот скачивает видео и загружает его в storage-чат. Если Telegram покажет результат `Готовлю видео...`, повторите inline-запрос через несколько секунд. Повторные запросы по тому же Reel будут работать из кэша.
 
+## Docker
+
+Локально можно собрать и запустить контейнер через Docker Compose:
+
+```powershell
+docker compose up -d --build
+```
+
+Перед запуском рядом должен быть `.env` с `BOT_TOKEN` и остальными настройками.
+
+## GitHub Actions Deploy
+
+В репозитории есть workflow `.github/workflows/deploy.yml`. Он запускается при push в `main` или вручную через `workflow_dispatch`.
+
+Что делает pipeline:
+
+1. Собирает Docker-образ.
+2. Публикует образ в GitHub Container Registry: `ghcr.io`.
+3. Подключается к серверу по SSH.
+4. Создает/обновляет `.env` и `docker-compose.yml` на сервере.
+5. Выполняет `docker compose pull` и `docker compose up -d`.
+
+Добавьте в GitHub repository secrets:
+
+```text
+BOT_TOKEN
+STORAGE_CHAT_ID
+SSH_HOST
+SSH_USER
+SSH_PRIVATE_KEY
+```
+
+Опциональные secrets:
+
+```text
+SSH_PORT
+GHCR_USERNAME
+GHCR_TOKEN
+INSTAGRAM_COOKIES_B64
+```
+
+`GHCR_USERNAME` и `GHCR_TOKEN` нужны, если GHCR package приватный. Для `GHCR_TOKEN` используйте GitHub Personal Access Token с правом `read:packages`.
+
+Если нужны Instagram cookies на сервере, закодируйте cookies-файл в base64 и сохраните результат в `INSTAGRAM_COOKIES_B64`:
+
+```powershell
+[Convert]::ToBase64String([IO.File]::ReadAllBytes("C:\path\to\instagram_cookies.txt"))
+```
+
+Опциональные repository variables:
+
+```text
+DEPLOY_PATH
+MAX_FILE_SIZE_MB
+UPLOAD_TIMEOUT_SECONDS
+INLINE_PREPARE_WAIT_SECONDS
+```
+
+Если `DEPLOY_PATH` не задан, деплой идет в:
+
+```text
+$HOME/instagram-reels-bot
+```
+
+На сервере должны быть установлены Docker и Docker Compose plugin.
+
 ## Как это работает
 
 - `python-telegram-bot` принимает сообщения и отправляет файл в Telegram.

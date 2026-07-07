@@ -1,0 +1,14 @@
+.git/
+.github/
+.idea/
+.venv/
+__pycache__/
+*.pyc
+*.log
+.env
+.env.*
+!.env.example
+.inline_cache.json
+cookies/
+downloads/
+data/

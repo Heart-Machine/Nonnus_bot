@@ -1,0 +1,119 @@
+name: Build and Deploy
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build:
+    name: Build Docker Image
+    runs-on: ubuntu-latest
+    outputs:
+      image: ${{ steps.image.outputs.image }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Prepare image name
+        id: image
+        run: |
+          IMAGE="ghcr.io/${GITHUB_REPOSITORY,,}:${GITHUB_SHA}"
+          echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
+          echo "IMAGE_LATEST=ghcr.io/${GITHUB_REPOSITORY,,}:latest" >> "$GITHUB_ENV"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ steps.image.outputs.image }}
+            ${{ env.IMAGE_LATEST }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  deploy:
+    name: Deploy over SSH
+    runs-on: ubuntu-latest
+    needs: build
+    environment: production
+    steps:
+      - name: Deploy
+        uses: appleboy/ssh-action@v1.2.0
+        env:
+          IMAGE: ${{ needs.build.outputs.image }}
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          STORAGE_CHAT_ID: ${{ secrets.STORAGE_CHAT_ID }}
+          MAX_FILE_SIZE_MB: ${{ vars.MAX_FILE_SIZE_MB || '50' }}
+          UPLOAD_TIMEOUT_SECONDS: ${{ vars.UPLOAD_TIMEOUT_SECONDS || '180' }}
+          INLINE_PREPARE_WAIT_SECONDS: ${{ vars.INLINE_PREPARE_WAIT_SECONDS || '8' }}
+          DEPLOY_PATH: ${{ vars.DEPLOY_PATH }}
+          INSTAGRAM_COOKIES_B64: ${{ secrets.INSTAGRAM_COOKIES_B64 }}
+          GHCR_USERNAME: ${{ secrets.GHCR_USERNAME }}
+          GHCR_TOKEN: ${{ secrets.GHCR_TOKEN }}
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          port: ${{ secrets.SSH_PORT || 22 }}
+          envs: IMAGE,BOT_TOKEN,STORAGE_CHAT_ID,MAX_FILE_SIZE_MB,UPLOAD_TIMEOUT_SECONDS,INLINE_PREPARE_WAIT_SECONDS,DEPLOY_PATH,INSTAGRAM_COOKIES_B64,GHCR_USERNAME,GHCR_TOKEN
+          script_stop: true
+          script: |
+            APP_DIR="${DEPLOY_PATH:-$HOME/instagram-reels-bot}"
+            mkdir -p "$APP_DIR/data" "$APP_DIR/cookies"
+            cd "$APP_DIR"
+
+            if [ -n "$GHCR_TOKEN" ]; then
+              echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USERNAME" --password-stdin
+            fi
+
+            COOKIES_FILE_VALUE=""
+            if [ -n "$INSTAGRAM_COOKIES_B64" ]; then
+              echo "$INSTAGRAM_COOKIES_B64" | base64 -d > cookies/instagram_cookies.txt
+              chmod 600 cookies/instagram_cookies.txt
+              COOKIES_FILE_VALUE="/app/cookies/instagram_cookies.txt"
+            fi
+
+            cat > .env <<EOF
+            BOT_TOKEN=$BOT_TOKEN
+            COOKIES_FILE=$COOKIES_FILE_VALUE
+            MAX_FILE_SIZE_MB=$MAX_FILE_SIZE_MB
+            UPLOAD_TIMEOUT_SECONDS=$UPLOAD_TIMEOUT_SECONDS
+            STORAGE_CHAT_ID=$STORAGE_CHAT_ID
+            INLINE_PREPARE_WAIT_SECONDS=$INLINE_PREPARE_WAIT_SECONDS
+            INLINE_CACHE_FILE=/app/data/inline_cache.json
+            EOF
+            chmod 600 .env
+
+            cat > docker-compose.yml <<EOF
+            services:
+              instagram-reels-bot:
+                image: $IMAGE
+                container_name: instagram-reels-bot
+                restart: unless-stopped
+                env_file:
+                  - .env
+                volumes:
+                  - ./data:/app/data
+                  - ./cookies:/app/cookies:ro
+            EOF
+
+            docker compose pull
+            docker compose up -d
+            docker image prune -f

@@ -1,0 +1,11 @@
+services:
+  instagram-reels-bot:
+    build: .
+    image: ${IMAGE:-instagram-reels-bot:local}
+    container_name: instagram-reels-bot
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - ./data:/app/data
+      - ./cookies:/app/cookies:ro
