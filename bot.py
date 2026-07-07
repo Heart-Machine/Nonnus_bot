@@ -240,6 +240,22 @@ def build_reel_caption(info: dict[str, Any], fallback_url: str) -> str:
     return escape(str(reel_url))
 
 
+def has_audio_format(info: dict[str, Any]) -> bool:
+    formats = info.get("formats") or []
+    return any(
+        item.get("acodec") not in {None, "none"}
+        for item in formats
+    )
+
+
+def add_audio_warning_if_needed(caption: str, info: dict[str, Any]) -> str:
+    if has_audio_format(info):
+        return caption
+
+    warning = "Звук недоступен: Instagram не отдал аудиодорожку для этого Reel."
+    return f"{caption}\n\n{escape(warning)}"
+
+
 def download_video(url: str, download_dir: Path) -> Tuple[Path, str]:
     output_template = str(download_dir / "%(id)s.%(ext)s")
     cookiefile = None
@@ -278,7 +294,8 @@ def download_video(url: str, download_dir: Path) -> Tuple[Path, str]:
             raise FileNotFoundError("yt-dlp did not create a video file")
         video_path = candidates[0]
 
-    return video_path, build_reel_caption(info, url)
+    caption = build_reel_caption(info, url)
+    return video_path, add_audio_warning_if_needed(caption, info)
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
