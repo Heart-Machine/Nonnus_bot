@@ -479,7 +479,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     url = find_instagram_url(message.text)
     if not url:
-        await message.reply_text("Не вижу ссылку на Instagram Reel. Пришли ссылку вида https://www.instagram.com/reel/...")
+        await message.reply_text(
+            "Не вижу ссылку на Instagram Reel. Пришли ссылку на ролик в формате: instagram.com / reel / CODE",
+            disable_web_page_preview=True,
+        )
         return
 
     status_message = await message.reply_text("Скачиваю видео...")
