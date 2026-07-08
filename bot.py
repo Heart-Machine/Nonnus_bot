@@ -6,6 +6,7 @@ import logging
 import os
 import re
 import shutil
+import subprocess
 import tempfile
 from pathlib import Path
 from typing import Any, Optional, Tuple
@@ -23,11 +24,41 @@ BASE_DIR = Path(__file__).resolve().parent
 
 load_dotenv(BASE_DIR / ".env")
 
+
+def env_bool(name: str, default: bool) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+
+    return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def env_int_list(name: str, default: list[int]) -> list[int]:
+    value = os.getenv(name, "").strip()
+    if not value:
+        return default
+
+    result = []
+    for item in value.split(","):
+        item = item.strip()
+        if item.isdigit():
+            result.append(int(item))
+
+    return result or default
+
+
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 COOKIES_FILE = os.getenv("COOKIES_FILE", "").strip()
 MAX_FILE_SIZE_MB = int(os.getenv("MAX_FILE_SIZE_MB", "50"))
 MAX_FILE_SIZE_BYTES = MAX_FILE_SIZE_MB * 1024 * 1024
 UPLOAD_TIMEOUT_SECONDS = int(os.getenv("UPLOAD_TIMEOUT_SECONDS", "180"))
+ENABLE_VIDEO_COMPRESSION = env_bool("ENABLE_VIDEO_COMPRESSION", True)
+VIDEO_COMPRESSION_TARGET_MB = int(os.getenv("VIDEO_COMPRESSION_TARGET_MB", str(max(MAX_FILE_SIZE_MB - 1, 1))))
+VIDEO_COMPRESSION_TARGET_BYTES = VIDEO_COMPRESSION_TARGET_MB * 1024 * 1024
+VIDEO_COMPRESSION_HEIGHTS = env_int_list("VIDEO_COMPRESSION_HEIGHTS", [1280, 854, 640])
+VIDEO_COMPRESSION_AUDIO_KBPS = int(os.getenv("VIDEO_COMPRESSION_AUDIO_KBPS", "96"))
+VIDEO_COMPRESSION_PRESET = os.getenv("VIDEO_COMPRESSION_PRESET", "veryfast").strip() or "veryfast"
+VIDEO_COMPRESSION_MIN_VIDEO_KBPS = int(os.getenv("VIDEO_COMPRESSION_MIN_VIDEO_KBPS", "250"))
 STORAGE_CHAT_ID = os.getenv("STORAGE_CHAT_ID", "").strip()
 INLINE_PREPARE_WAIT_SECONDS = int(os.getenv("INLINE_PREPARE_WAIT_SECONDS", "8"))
 INLINE_CACHE_VERSION = "2"
@@ -256,6 +287,114 @@ def add_audio_warning_if_needed(caption: str, info: dict[str, Any]) -> str:
     return f"{caption}\n\n{escape(warning)}"
 
 
+def get_video_duration_seconds(video_path: Path) -> Optional[float]:
+    try:
+        result = subprocess.run(
+            [
+                "ffprobe",
+                "-v",
+                "error",
+                "-show_entries",
+                "format=duration",
+                "-of",
+                "default=noprint_wrappers=1:nokey=1",
+                str(video_path),
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except (FileNotFoundError, subprocess.SubprocessError):
+        logger.exception("Failed to read video duration with ffprobe")
+        return None
+
+    try:
+        duration = float(result.stdout.strip())
+    except ValueError:
+        return None
+
+    return duration if duration > 0 else None
+
+
+def compress_video(video_path: Path, work_dir: Path) -> Optional[Path]:
+    if not ENABLE_VIDEO_COMPRESSION:
+        return None
+
+    duration = get_video_duration_seconds(video_path)
+    if not duration:
+        return None
+
+    target_bits_per_second = int((VIDEO_COMPRESSION_TARGET_BYTES * 8 * 0.92) / duration)
+    audio_kbps = min(VIDEO_COMPRESSION_AUDIO_KBPS, max(48, target_bits_per_second // 1000 // 5))
+    video_kbps = max((target_bits_per_second // 1000) - audio_kbps, VIDEO_COMPRESSION_MIN_VIDEO_KBPS)
+
+    for height in VIDEO_COMPRESSION_HEIGHTS:
+        output_path = work_dir / f"{video_path.stem}.compressed-{height}p.mp4"
+        command = [
+            "ffmpeg",
+            "-y",
+            "-i",
+            str(video_path),
+            "-vf",
+            f"scale=-2:{height}:force_original_aspect_ratio=decrease",
+            "-c:v",
+            "libx264",
+            "-preset",
+            VIDEO_COMPRESSION_PRESET,
+            "-b:v",
+            f"{video_kbps}k",
+            "-maxrate",
+            f"{video_kbps}k",
+            "-bufsize",
+            f"{video_kbps * 2}k",
+            "-c:a",
+            "aac",
+            "-b:a",
+            f"{audio_kbps}k",
+            "-movflags",
+            "+faststart",
+            str(output_path),
+        ]
+
+        try:
+            subprocess.run(command, check=True, capture_output=True, timeout=900)
+        except FileNotFoundError:
+            logger.exception("ffmpeg is not installed")
+            return None
+        except subprocess.SubprocessError:
+            logger.exception("Failed to compress video to %sp", height)
+            continue
+
+        if output_path.exists() and output_path.stat().st_size <= VIDEO_COMPRESSION_TARGET_BYTES:
+            return output_path
+
+    candidates = sorted(
+        work_dir.glob(f"{video_path.stem}.compressed-*.mp4"),
+        key=lambda item: item.stat().st_size,
+    )
+    return candidates[0] if candidates else None
+
+
+def prepare_video_for_upload(video_path: Path, work_dir: Path) -> Tuple[Path, bool]:
+    if video_path.stat().st_size <= MAX_FILE_SIZE_BYTES:
+        return video_path, False
+
+    compressed_path = compress_video(video_path, work_dir)
+    if compressed_path and compressed_path.stat().st_size < video_path.stat().st_size:
+        return compressed_path, True
+
+    return video_path, False
+
+
+def add_compression_note_if_needed(caption: str, compressed: bool) -> str:
+    if not compressed:
+        return caption
+
+    note = "Видео было сжато, чтобы Telegram принял файл."
+    return f"{caption}\n\n{escape(note)}"
+
+
 def download_video(url: str, download_dir: Path) -> Tuple[Path, str]:
     output_template = str(download_dir / "%(id)s.%(ext)s")
     cookiefile = None
@@ -369,6 +508,8 @@ async def prepare_inline_video(url: str, context: ContextTypes.DEFAULT_TYPE) -> 
     temp_dir = Path(tempfile.mkdtemp(prefix="ig_inline_"))
     try:
         video_path, caption = await asyncio.to_thread(download_video, url, temp_dir)
+        video_path, compressed = await asyncio.to_thread(prepare_video_for_upload, video_path, temp_dir)
+        caption = add_compression_note_if_needed(caption, compressed)
         file_size = video_path.stat().st_size
         if file_size > MAX_FILE_SIZE_BYTES:
             raise RuntimeError(f"Video file is larger than {MAX_FILE_SIZE_MB} MB")
@@ -500,6 +641,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             return
 
         file_size = video_path.stat().st_size
+
+        if file_size > MAX_FILE_SIZE_BYTES:
+            if ENABLE_VIDEO_COMPRESSION:
+                await status_message.edit_text("Видео большое, сжимаю перед отправкой...")
+                video_path, compressed = await asyncio.to_thread(prepare_video_for_upload, video_path, temp_dir)
+                caption = add_compression_note_if_needed(caption, compressed)
+                file_size = video_path.stat().st_size
 
         if file_size > MAX_FILE_SIZE_BYTES:
             await status_message.edit_text(
