@@ -67,7 +67,7 @@ if not INLINE_CACHE_FILE.is_absolute():
     INLINE_CACHE_FILE = BASE_DIR / INLINE_CACHE_FILE
 
 INSTAGRAM_URL_RE = re.compile(
-    r"https?://(?:www\.)?instagram\.com/(?:reel|reels|p|tv)/[A-Za-z0-9_\-]+/?"
+    r"https?://(?:www\.)?(?:instagram\.com|instagr\.am)/(?:reel|reels|p|tv)/[A-Za-z0-9_\-]+/?"
     r"(?:\?[^\s.,!?;:()\[\]{}<>'\"]+)?",
     re.IGNORECASE,
 )
@@ -489,6 +489,9 @@ def add_compression_note_if_needed(caption: str, compressed: bool) -> str:
 
 
 def download_video(url: str, download_dir: Path) -> Tuple[Path, str]:
+    # Canonicalize to instagram.com: yt-dlp's Instagram extractor only
+    # recognizes that domain, not aliases like instagr.am.
+    url = normalize_reel_url(url)
     output_template = str(download_dir / "%(id)s.%(ext)s")
     cookiefile = None
     if COOKIES_FILE:
