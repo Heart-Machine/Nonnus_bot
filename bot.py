@@ -81,7 +81,6 @@ VIDEO_COMPRESSION_AUDIO_KBPS = int(os.getenv("VIDEO_COMPRESSION_AUDIO_KBPS", "96
 VIDEO_COMPRESSION_PRESET = os.getenv("VIDEO_COMPRESSION_PRESET", "veryfast").strip() or "veryfast"
 VIDEO_COMPRESSION_MIN_VIDEO_KBPS = int(os.getenv("VIDEO_COMPRESSION_MIN_VIDEO_KBPS", "250"))
 STORAGE_CHAT_ID = os.getenv("STORAGE_CHAT_ID", "").strip()
-INLINE_PREPARE_WAIT_SECONDS = int(os.getenv("INLINE_PREPARE_WAIT_SECONDS", "8"))
 INLINE_CACHE_VERSION = "3"
 INLINE_CACHE_FILE = Path(os.getenv("INLINE_CACHE_FILE", str(BASE_DIR / ".inline_cache.json"))).expanduser()
 if not INLINE_CACHE_FILE.is_absolute():
@@ -882,64 +881,69 @@ async def handle_inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     task = get_or_create_prepare_task(url, context)
 
-    try:
-        cached_result = await asyncio.wait_for(asyncio.shield(task), timeout=INLINE_PREPARE_WAIT_SECONDS)
-    except TimeoutError:
-        placeholder_photo_file_id = await get_placeholder_photo_file_id(context)
-        if placeholder_photo_file_id:
-            # The message will update itself once the video is ready - see
-            # handle_chosen_inline_result().
-            await inline_query.answer(
-                [build_inline_placeholder_result(url, placeholder_photo_file_id)],
-                cache_time=0,
-                is_personal=True,
-            )
-        else:
+    # A zero-cost check, not a wait: if this task was already started by a
+    # concurrent request for the same URL and happened to finish in the
+    # meantime, we can answer with the real video right away. Otherwise -
+    # no artificial delay - answer immediately with a self-updating
+    # placeholder; handle_chosen_inline_result() swaps it for the real
+    # video via editMessageMedia once the same task completes.
+    if task.done():
+        try:
+            cached_result = task.result()
+        except NoVideoInPostError:
+            logger.info("No video track in post %s", url)
             await inline_query.answer(
                 [
                     build_inline_article(
                         inline_result_id(url),
-                        "Готовлю видео...",
-                        "Через несколько секунд повтори inline-запрос",
-                        "Видео готовится. Повтори inline-запрос через несколько секунд.",
+                        "В посте нет видео",
+                        "Это фото или карусель без видео",
+                        "В этой публикации нет видео — это фото или карусель без видео. Пришли ссылку на Reel или пост с видео.",
                     )
                 ],
                 cache_time=0,
                 is_personal=True,
             )
-        return
-    except NoVideoInPostError:
-        logger.info("No video track in post %s", url)
-        await inline_query.answer(
-            [
-                build_inline_article(
-                    inline_result_id(url),
-                    "В посте нет видео",
-                    "Это фото или карусель без видео",
-                    "В этой публикации нет видео — это фото или карусель без видео. Пришли ссылку на Reel или пост с видео.",
-                )
-            ],
-            cache_time=0,
-            is_personal=True,
-        )
-        return
-    except Exception:
-        logger.exception("Failed to prepare inline result for %s", url)
-        await inline_query.answer(
-            [
-                build_inline_article(
-                    inline_result_id(url),
-                    "Не получилось подготовить видео",
-                    "Попробуй еще раз или отправь ссылку боту в личку",
-                    "Не получилось подготовить видео для inline-отправки.",
-                )
-            ],
-            cache_time=0,
-            is_personal=True,
-        )
+            return
+        except Exception:
+            logger.exception("Failed to prepare inline result for %s", url)
+            await inline_query.answer(
+                [
+                    build_inline_article(
+                        inline_result_id(url),
+                        "Не получилось подготовить видео",
+                        "Попробуй еще раз или отправь ссылку боту в личку",
+                        "Не получилось подготовить видео для inline-отправки.",
+                    )
+                ],
+                cache_time=0,
+                is_personal=True,
+            )
+            return
+
+        await inline_query.answer([build_inline_result(url, cached_result)], cache_time=0, is_personal=True)
         return
 
-    await inline_query.answer([build_inline_result(url, cached_result)], cache_time=0, is_personal=True)
+    placeholder_photo_file_id = await get_placeholder_photo_file_id(context)
+    if placeholder_photo_file_id:
+        await inline_query.answer(
+            [build_inline_placeholder_result(url, placeholder_photo_file_id)],
+            cache_time=0,
+            is_personal=True,
+        )
+    else:
+        await inline_query.answer(
+            [
+                build_inline_article(
+                    inline_result_id(url),
+                    "Готовлю видео...",
+                    "Через несколько секунд повтори inline-запрос",
+                    "Видео готовится. Повтори inline-запрос через несколько секунд.",
+                )
+            ],
+            cache_time=0,
+            is_personal=True,
+        )
 
 
 async def handle_chosen_inline_result(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
