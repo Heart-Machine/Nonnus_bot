@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import hashlib
 from html import escape
 import json
@@ -13,10 +14,29 @@ from typing import Any, Optional, Tuple
 from urllib.parse import urlparse
 
 from dotenv import load_dotenv
-from telegram import InlineQueryResultArticle, InlineQueryResultCachedDocument, InlineQueryResultCachedVideo, InputTextMessageContent, Update
+from telegram import (
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    InlineQueryResultArticle,
+    InlineQueryResultCachedDocument,
+    InlineQueryResultCachedPhoto,
+    InlineQueryResultCachedVideo,
+    InputMediaDocument,
+    InputMediaVideo,
+    InputTextMessageContent,
+    Update,
+)
 from telegram.constants import ChatAction, ParseMode
 from telegram.error import BadRequest, NetworkError, TelegramError, TimedOut
-from telegram.ext import Application, CommandHandler, ContextTypes, InlineQueryHandler, MessageHandler, filters
+from telegram.ext import (
+    Application,
+    ChosenInlineResultHandler,
+    CommandHandler,
+    ContextTypes,
+    InlineQueryHandler,
+    MessageHandler,
+    filters,
+)
 from yt_dlp import YoutubeDL
 from yt_dlp.utils import ExtractorError
 
@@ -72,6 +92,43 @@ INSTAGRAM_URL_RE = re.compile(
     r"(?:\?[^\s.,!?;:()\[\]{}<>'\"]+)?",
     re.IGNORECASE,
 )
+
+# A small "Готовлю видео..." placeholder photo (240x426 JPEG, generated once
+# with ffmpeg's drawtext filter) shown as the inline result while a Reel is
+# being downloaded, so the query doesn't have to be retyped once it's ready -
+# see get_placeholder_photo_file_id() and handle_chosen_inline_result().
+INLINE_PLACEHOLDER_IMAGE_B64 = (
+    "/9j/4AAQSkZJRgABAgAAAQABAAD//gAQTGF2YzYyLjI4LjEwMAD/2wBDAAgMDA4MDhAQEBAQEBMSExQUFBMTExMUFBQVFRUZ"
+    "GRkVFRUUFBUVGBgZGRscGxoaGRocHB4eHiQkIiIqKiszMz7/xABxAAEBAQEBAQEAAAAAAAAAAAAABQYEBwMCAQEBAQAAAAAA"
+    "AAAAAAAAAAAAAQMQAQACAgEEAAUCBAYDAQAAAAACAQMEERIFIRMxFEEiUWFCIxWBUgYls3WRgmIyUzMRAQEAAAAAAAAAAAAA"
+    "AAAAAAAR/8AAEQgBqgDwAwEiAAIRAAMRAP/aAAwDAQACEQMRAD8A8kAbsAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFntuh/MMuSF5Y4I48OTNOcoylVQx1zLxHmV+PwCMLG5q6uCMbwb2Pau74uMc"
+    "WbH01x8ecsI1f9EcAAAAAAAAAAAAAAAAAAAAAAAAAABrew/+/cP9s3f9NkndrbeXUvLePj+LhyYZc1z9mSuJcfrx9QVuxa2L"
+    "a7hjhlh7I1HLk9f/ANLx45TqH9brz+i52/cl3fJn1drFreq9fPkhePBixXrSx47nGUJY4xlUauqjdSu+avyw2HNk18kMuKdw"
+    "nC6lGUfjV0t5+9befHkx8YMXt8ZZYcGLFPLXx4yThGpXV35uvFX9UVotTue1XZ9rJ1YuvBl1ceOV4Ne7jCUcnNecfnnprzLm"
+    "3Lk2Jds0NHLrww+3crNly554cWS7uOW41ih7ISjGMarmVVXm7ZOG3lhrZdauPXlnCcvHnqx9XTxf/a3dq912dXF6KrDmxdXX"
+    "WPPhx5oRl/dGpxvpu/rx4sG71MWHJ3Ts+z6sWKW1rZsmXHUK9fXCGaNZax8cVU+mpcVXHPwcG9OG12rZn8xg38mLLhv2Y9aO"
+    "tLXhK7jd/wD545ZKySuMeKq6jxyyce77kd2O7c4zzQq4x6ox6Kj0XDoqFVUajUbviNVVPrl7xsZIeuserix3OE548Wvjxxy3"
+    "C+Y1l6a5nGr/AG3fCRW57NO9e+y6vTj42fmc2aMseOVyhdyjj5uUblVfZd1xdfFA0tXW2Oyx92eGt/mNxrJLHOd3/Aj9n2Vd"
+    "1+fPhA/m2387Dd6o+3HVVCuiNY4RqPTUIwriNRqvhVOH5vL8r8r49XuvNxx567h0fH8cV8CI9Cls+rvVdrjra/ynzENa8N4M"
+    "dylC7qF5Ly9Pt6756+rq+LzraxRw7GfHC+qOPLOEb/NRldVf/C3/AD/e6a84fbUOitn04vmajxxx7unr548dXPV+rMqPbYZM"
+    "Mc/b8E9nWqE9XU5056cZXmlPFH7fdeLiN5L/AHXPwx+n23Jt6OzrxhHHOu44oylLjjDCOLPc7lP+2FVzfnzwmV3/AG41iuse"
+    "p7MUIY8ea9bFLNGscemN1OVXfNVXi0zH3Paxa+zrRycQ2ZVLNf75cf8Al8eL/d+UitN3r5bLpdtrTxcY45dvDC+n+Jm6PRXX"
+    "P63KcruXH054W9jJxj7no8YrhpdvwQ8Y8fPvheGOSXXUevnquVX5ZHtndflZYfbUJR1YbU9fnHUuNjLCuiV8/icIXV/RR0v8"
+    "Q8bF/M6+nWHNzWx0asOqcb8+ePN/dxfn6gq4q1+36GjcdnW1p7GOWbLLLp3syy/fcejq9eSMYRquLjXF8+bc/GhCXdt/Sx4s"
+    "0cFa3ojLHd4scs98ZMlYslfCEquoVKuK5plNfu2zr4K1+MGbFG7lCGxhx5qx3fxuHXG7jz9arx+j44O57WvnyZ8coRlkq45I"
+    "+vH6pxv4wli6fX0/p0+PoRF+ea+59q2s+xDFWbVy4Kx5oYseK5xy9VSxSrHGMZdPHVXjmmJWNvuextwjil6seKEuqsWHFDFj"
+    "678ddxhVdUuPHMufD85e45st7Nyjgr5moVPpw448evjj18R+z4eenjn6qJI69nZntT651Cr6Yx+yEYVxCuK8Rqq5/NuRUAAA"
+    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+    "AAAAAAAf/9k="
+)
+INLINE_PLACEHOLDER_IMAGE_BYTES = base64.b64decode(INLINE_PLACEHOLDER_IMAGE_B64)
 
 
 logging.basicConfig(
@@ -179,6 +236,51 @@ def build_inline_article(result_id: str, title: str, description: str, message_t
         title=title,
         description=description,
         input_message_content=InputTextMessageContent(message_text),
+    )
+
+
+async def get_placeholder_photo_file_id(context: ContextTypes.DEFAULT_TYPE) -> Optional[str]:
+    """Upload the "Готовлю видео..." placeholder image to the storage chat
+    once per bot run and cache its file_id, so every not-yet-ready inline
+    query can reuse it as InlineQueryResultCachedPhoto instead of re-sending
+    the bytes each time."""
+    file_id = context.application.bot_data.get("placeholder_photo_file_id")
+    if file_id:
+        return file_id
+
+    if not STORAGE_CHAT_ID:
+        return None
+
+    try:
+        sent_message = await context.bot.send_photo(
+            chat_id=parse_storage_chat_id(),
+            photo=INLINE_PLACEHOLDER_IMAGE_BYTES,
+        )
+    except TelegramError:
+        logger.exception("Failed to upload inline placeholder photo")
+        return None
+
+    if not sent_message.photo:
+        return None
+
+    file_id = sent_message.photo[-1].file_id
+    context.application.bot_data["placeholder_photo_file_id"] = file_id
+    return file_id
+
+
+def build_inline_placeholder_result(url: str, photo_file_id: str) -> InlineQueryResultCachedPhoto:
+    """A placeholder inline result shown while a Reel is being prepared. It
+    carries a reply_markup so Telegram is guaranteed to report an
+    inline_message_id in chosen_inline_result, which handle_chosen_inline_result
+    then uses to swap this placeholder for the real video once it's ready -
+    no need for the user to retype the query."""
+    return InlineQueryResultCachedPhoto(
+        id=inline_result_id(url),
+        photo_file_id=photo_file_id,
+        caption="Готовлю видео, подожди немного — сообщение обновится само...",
+        reply_markup=InlineKeyboardMarkup(
+            [[InlineKeyboardButton("Открыть в Instagram", url=normalize_reel_url(url))]]
+        ),
     )
 
 
@@ -783,18 +885,28 @@ async def handle_inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE
     try:
         cached_result = await asyncio.wait_for(asyncio.shield(task), timeout=INLINE_PREPARE_WAIT_SECONDS)
     except TimeoutError:
-        await inline_query.answer(
-            [
-                build_inline_article(
-                    inline_result_id(url),
-                    "Готовлю видео...",
-                    "Через несколько секунд повтори inline-запрос",
-                    "Видео готовится. Повтори inline-запрос через несколько секунд.",
-                )
-            ],
-            cache_time=0,
-            is_personal=True,
-        )
+        placeholder_photo_file_id = await get_placeholder_photo_file_id(context)
+        if placeholder_photo_file_id:
+            # The message will update itself once the video is ready - see
+            # handle_chosen_inline_result().
+            await inline_query.answer(
+                [build_inline_placeholder_result(url, placeholder_photo_file_id)],
+                cache_time=0,
+                is_personal=True,
+            )
+        else:
+            await inline_query.answer(
+                [
+                    build_inline_article(
+                        inline_result_id(url),
+                        "Готовлю видео...",
+                        "Через несколько секунд повтори inline-запрос",
+                        "Видео готовится. Повтори inline-запрос через несколько секунд.",
+                    )
+                ],
+                cache_time=0,
+                is_personal=True,
+            )
         return
     except NoVideoInPostError:
         logger.info("No video track in post %s", url)
@@ -828,6 +940,56 @@ async def handle_inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
 
     await inline_query.answer([build_inline_result(url, cached_result)], cache_time=0, is_personal=True)
+
+
+async def handle_chosen_inline_result(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Once a user picks the placeholder result built by
+    build_inline_placeholder_result(), swap it for the real video in place
+    as soon as it's ready, using the same deduplicated prepare task the
+    inline query itself started. Requires inline feedback collection to be
+    enabled for the bot via @BotFather (/setinlinefeedback)."""
+    chosen = update.chosen_inline_result
+    if chosen is None or chosen.inline_message_id is None:
+        return
+
+    url = find_instagram_url(chosen.query)
+    if not url:
+        return
+
+    # Already-cached results are answered as the final video directly by
+    # handle_inline_query and carry no reply_markup, so they never reach
+    # here with an inline_message_id - only unfinished placeholders do.
+    cached_result = get_cached_inline_result(url)
+    if cached_result is None:
+        task = get_or_create_prepare_task(url, context)
+        try:
+            cached_result = await task
+        except Exception:
+            logger.exception("Failed to prepare inline result for %s after chosen_inline_result", url)
+            try:
+                await context.bot.edit_message_caption(
+                    inline_message_id=chosen.inline_message_id,
+                    caption="Не получилось подготовить видео. Попробуй еще раз.",
+                    reply_markup=None,
+                )
+            except TelegramError:
+                pass
+            return
+
+    caption = cached_result.get("caption", "")
+    media = (
+        InputMediaDocument(media=cached_result["file_id"], caption=caption, parse_mode=ParseMode.HTML)
+        if cached_result.get("type") == "document"
+        else InputMediaVideo(media=cached_result["file_id"], caption=caption, parse_mode=ParseMode.HTML)
+    )
+    try:
+        await context.bot.edit_message_media(
+            inline_message_id=chosen.inline_message_id,
+            media=media,
+            reply_markup=None,
+        )
+    except TelegramError:
+        logger.exception("Failed to swap placeholder for the prepared video (inline_message_id=%s)", chosen.inline_message_id)
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -996,6 +1158,7 @@ def main() -> None:
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("chatid", chatid))
     app.add_handler(InlineQueryHandler(handle_inline_query))
+    app.add_handler(ChosenInlineResultHandler(handle_chosen_inline_result))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
