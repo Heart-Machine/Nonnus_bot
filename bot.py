@@ -339,6 +339,56 @@ def get_video_duration_seconds(video_path: Path) -> Optional[float]:
     return duration if duration > 0 else None
 
 
+def get_video_dimensions(video_path: Path) -> Optional[Tuple[int, int]]:
+    try:
+        result = subprocess.run(
+            [
+                "ffprobe",
+                "-v",
+                "error",
+                "-select_streams",
+                "v:0",
+                "-show_entries",
+                "stream=width,height",
+                "-of",
+                "csv=s=x:p=0",
+                str(video_path),
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except (FileNotFoundError, subprocess.SubprocessError):
+        logger.exception("Failed to read video dimensions with ffprobe")
+        return None
+
+    try:
+        width_str, height_str = result.stdout.strip().split("x")
+        width, height = int(width_str), int(height_str)
+    except ValueError:
+        return None
+
+    return (width, height) if width > 0 and height > 0 else None
+
+
+def video_send_hints(video_path: Path) -> dict[str, Any]:
+    """Best-effort width/height/duration for Telegram's sendVideo call, so
+    the client doesn't have to guess the aspect ratio itself before (or
+    instead of) fully decoding the stream."""
+    hints: dict[str, Any] = {}
+
+    dimensions = get_video_dimensions(video_path)
+    if dimensions:
+        hints["width"], hints["height"] = dimensions
+
+    duration = get_video_duration_seconds(video_path)
+    if duration:
+        hints["duration"] = round(duration)
+
+    return hints
+
+
 H264_COMPATIBLE_CODECS = {"h264", "avc1"}
 
 
@@ -579,6 +629,7 @@ async def upload_video_to_storage(context: ContextTypes.DEFAULT_TYPE, video_path
                 caption=caption,
                 parse_mode=ParseMode.HTML,
                 supports_streaming=True,
+                **video_send_hints(video_path),
                 read_timeout=UPLOAD_TIMEOUT_SECONDS,
                 write_timeout=UPLOAD_TIMEOUT_SECONDS,
                 connect_timeout=30,
@@ -886,6 +937,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                     caption=caption,
                     parse_mode=ParseMode.HTML,
                     supports_streaming=True,
+                    **video_send_hints(video_path),
                     read_timeout=UPLOAD_TIMEOUT_SECONDS,
                     write_timeout=UPLOAD_TIMEOUT_SECONDS,
                     connect_timeout=30,
