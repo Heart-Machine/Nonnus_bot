@@ -276,6 +276,8 @@ def build_inline_placeholder_result(url: str, photo_file_id: str) -> InlineQuery
     return InlineQueryResultCachedPhoto(
         id=inline_result_id(url),
         photo_file_id=photo_file_id,
+        title="Готовлю видео...",
+        description="Нажми, чтобы отправить — видео появится тут само через несколько секунд",
         caption="Готовлю видео, подожди немного — сообщение обновится само...",
         reply_markup=InlineKeyboardMarkup(
             [[InlineKeyboardButton("Открыть в Instagram", url=normalize_reel_url(url))]]
