@@ -18,6 +18,7 @@ from telegram.constants import ChatAction, ParseMode
 from telegram.error import BadRequest, NetworkError, TelegramError, TimedOut
 from telegram.ext import Application, CommandHandler, ContextTypes, InlineQueryHandler, MessageHandler, filters
 from yt_dlp import YoutubeDL
+from yt_dlp.utils import ExtractorError
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -488,6 +489,13 @@ def add_compression_note_if_needed(caption: str, compressed: bool) -> str:
     return f"{caption}\n\n{escape(note)}"
 
 
+class NoVideoInPostError(Exception):
+    """Raised when the linked Instagram post has no video track at all
+    (a photo post, or a carousel made only of photos) - distinct from a
+    genuine download failure so the user gets an accurate message instead
+    of being told to add cookies."""
+
+
 def download_video(url: str, download_dir: Path) -> Tuple[Path, str]:
     # Canonicalize to instagram.com: yt-dlp's Instagram extractor only
     # recognizes that domain, not aliases like instagr.am.
@@ -515,9 +523,16 @@ def download_video(url: str, download_dir: Path) -> Tuple[Path, str]:
     if cookiefile:
         ydl_opts["cookiefile"] = str(cookiefile)
 
-    with YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(url, download=True)
-        filename = ydl.prepare_filename(info)
+    try:
+        with YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=True)
+            filename = ydl.prepare_filename(info)
+    except ExtractorError as error:
+        if "no video formats" in str(error).lower():
+            raise NoVideoInPostError(
+                "This Instagram post has no video track (photo post or a photo-only carousel)."
+            ) from error
+        raise
 
     video_path = Path(filename)
     requested_downloads = info.get("requested_downloads") or []
@@ -730,6 +745,21 @@ async def handle_inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE
             is_personal=True,
         )
         return
+    except NoVideoInPostError:
+        logger.info("No video track in post %s", url)
+        await inline_query.answer(
+            [
+                build_inline_article(
+                    inline_result_id(url),
+                    "В посте нет видео",
+                    "Это фото или карусель без видео",
+                    "В этой публикации нет видео — это фото или карусель без видео. Пришли ссылку на Reel или пост с видео.",
+                )
+            ],
+            cache_time=0,
+            is_personal=True,
+        )
+        return
     except Exception:
         logger.exception("Failed to prepare inline result for %s", url)
         await inline_query.answer(
@@ -820,6 +850,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     try:
         try:
             video_path, caption = await asyncio.to_thread(download_video, url, temp_dir)
+        except NoVideoInPostError:
+            logger.info("No video track in post %s", url)
+            await status_message.edit_text(
+                "В этой публикации нет видео — это фото или карусель без видео. Пришли ссылку на Reel или пост с видео."
+            )
+            return
         except Exception:
             logger.exception("Failed to download %s", url)
             await status_message.edit_text(
