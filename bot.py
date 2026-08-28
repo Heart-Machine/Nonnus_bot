@@ -271,16 +271,36 @@ def build_reel_caption(info: dict[str, Any], fallback_url: str) -> str:
     return escape(str(reel_url))
 
 
-def has_audio_format(info: dict[str, Any]) -> bool:
-    formats = info.get("formats") or []
-    return any(
-        item.get("acodec") not in {None, "none"}
-        for item in formats
-    )
+def video_file_has_audio(video_path: Path) -> bool:
+    try:
+        result = subprocess.run(
+            [
+                "ffprobe",
+                "-v",
+                "error",
+                "-select_streams",
+                "a",
+                "-show_entries",
+                "stream=index",
+                "-of",
+                "csv=p=0",
+                str(video_path),
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except (FileNotFoundError, subprocess.SubprocessError):
+        logger.exception("Failed to probe audio streams with ffprobe")
+        # Не удалось проверить — не пугаем пользователя ложным предупреждением.
+        return True
+
+    return bool(result.stdout.strip())
 
 
-def add_audio_warning_if_needed(caption: str, info: dict[str, Any]) -> str:
-    if has_audio_format(info):
+def add_audio_warning_if_needed(caption: str, video_path: Path) -> str:
+    if video_file_has_audio(video_path):
         return caption
 
     warning = "Звук недоступен: Instagram не отдал аудиодорожку для этого Reel."
@@ -434,7 +454,7 @@ def download_video(url: str, download_dir: Path) -> Tuple[Path, str]:
         video_path = candidates[0]
 
     caption = build_reel_caption(info, url)
-    return video_path, add_audio_warning_if_needed(caption, info)
+    return video_path, add_audio_warning_if_needed(caption, video_path)
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
