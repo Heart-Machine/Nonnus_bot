@@ -620,6 +620,54 @@ async def prepare_inline_video(url: str, context: ContextTypes.DEFAULT_TYPE) -> 
         shutil.rmtree(temp_dir, ignore_errors=True)
 
 
+async def send_prepared_result(message, cached_result: dict[str, str]) -> None:
+    """Send an already-uploaded (storage-chat) video/document by file_id,
+    without re-downloading or re-uploading the bytes."""
+    caption = cached_result.get("caption", "")
+    file_id = cached_result["file_id"]
+    if cached_result.get("type") == "document":
+        await message.reply_document(
+            document=file_id,
+            caption=caption,
+            parse_mode=ParseMode.HTML,
+            read_timeout=UPLOAD_TIMEOUT_SECONDS,
+            write_timeout=UPLOAD_TIMEOUT_SECONDS,
+            connect_timeout=30,
+            pool_timeout=30,
+        )
+    else:
+        await message.reply_video(
+            video=file_id,
+            caption=caption,
+            parse_mode=ParseMode.HTML,
+            supports_streaming=True,
+            read_timeout=UPLOAD_TIMEOUT_SECONDS,
+            write_timeout=UPLOAD_TIMEOUT_SECONDS,
+            connect_timeout=30,
+            pool_timeout=30,
+        )
+
+
+def get_or_create_prepare_task(url: str, context: ContextTypes.DEFAULT_TYPE) -> asyncio.Task:
+    """Reuse an in-flight prepare_inline_video() task for the same Reel so
+    concurrent requests - inline queries and direct messages alike - don't
+    trigger duplicate downloads and uploads for the same URL."""
+    cache_key = normalize_reel_url(url)
+    inline_tasks = context.application.bot_data.setdefault("inline_tasks", {})
+    task = inline_tasks.get(cache_key)
+    if task is None or task.done():
+        task = context.application.create_task(prepare_inline_video(url, context))
+        inline_tasks[cache_key] = task
+
+        def forget_task(done_task: asyncio.Task, key: str = cache_key) -> None:
+            if inline_tasks.get(key) is done_task:
+                inline_tasks.pop(key, None)
+
+        task.add_done_callback(forget_task)
+
+    return task
+
+
 async def handle_inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     inline_query = update.inline_query
     if inline_query is None:
@@ -661,18 +709,7 @@ async def handle_inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE
         )
         return
 
-    cache_key = normalize_reel_url(url)
-    inline_tasks = context.application.bot_data.setdefault("inline_tasks", {})
-    task = inline_tasks.get(cache_key)
-    if task is None or task.done():
-        task = context.application.create_task(prepare_inline_video(url, context))
-        inline_tasks[cache_key] = task
-
-        def forget_task(done_task: asyncio.Task, key: str = cache_key) -> None:
-            if inline_tasks.get(key) is done_task:
-                inline_tasks.pop(key, None)
-
-        task.add_done_callback(forget_task)
+    task = get_or_create_prepare_task(url, context)
 
     try:
         cached_result = await asyncio.wait_for(asyncio.shield(task), timeout=INLINE_PREPARE_WAIT_SECONDS)
@@ -728,6 +765,54 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     status_message = await message.reply_text("Скачиваю видео...")
     await context.bot.send_chat_action(chat_id=message.chat_id, action=ChatAction.UPLOAD_VIDEO)
 
+    # Fast path: this Reel was already downloaded and uploaded to the
+    # storage chat before (via inline mode or an earlier message), so we
+    # can just resend the existing file_id instead of downloading again.
+    cached_result = get_cached_inline_result(url)
+    if cached_result:
+        try:
+            await send_prepared_result(message, cached_result)
+        except TelegramError:
+            logger.exception("Failed to resend cached video for %s, falling back to a fresh download", url)
+        else:
+            await status_message.delete()
+            return
+
+    if STORAGE_CHAT_ID:
+        # Prepare (download + upload to storage) via the same deduplicated
+        # task inline queries use, so concurrent requests for the same URL
+        # - from any chat - share one download/encode instead of each
+        # running their own.
+        task = get_or_create_prepare_task(url, context)
+        try:
+            cached_result = await task
+        except RuntimeError:
+            logger.exception("Video too large for %s", url)
+            await status_message.edit_text(
+                f"Видео скачалось, но файл больше {MAX_FILE_SIZE_MB} МБ. Telegram может не принять такой файл."
+            )
+            return
+        except Exception:
+            logger.exception("Failed to prepare %s", url)
+            await status_message.edit_text(
+                "Не получилось скачать видео. Если Reel приватный или Instagram просит вход, добавь cookies-файл в настройках."
+            )
+            return
+
+        try:
+            await send_prepared_result(message, cached_result)
+        except TelegramError:
+            logger.exception("Failed to deliver prepared video for %s", url)
+            await status_message.edit_text(
+                "Видео подготовлено, но Telegram не смог его отправить в этот чат. Попробуй отправить ссылку еще раз."
+            )
+            return
+
+        await status_message.delete()
+        return
+
+    # Legacy path for setups without STORAGE_CHAT_ID: download and send
+    # straight to this chat, without the shared cache/dedup above.
     temp_dir = Path(tempfile.mkdtemp(prefix="ig_reel_"))
     try:
         try:
