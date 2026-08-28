@@ -317,6 +317,78 @@ def get_video_duration_seconds(video_path: Path) -> Optional[float]:
     return duration if duration > 0 else None
 
 
+H264_COMPATIBLE_CODECS = {"h264", "avc1"}
+
+
+def get_video_codec(video_path: Path) -> Optional[str]:
+    try:
+        result = subprocess.run(
+            [
+                "ffprobe",
+                "-v",
+                "error",
+                "-select_streams",
+                "v:0",
+                "-show_entries",
+                "stream=codec_name",
+                "-of",
+                "default=noprint_wrappers=1:nokey=1",
+                str(video_path),
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except (FileNotFoundError, subprocess.SubprocessError):
+        logger.exception("Failed to read video codec with ffprobe")
+        return None
+
+    codec = result.stdout.strip()
+    return codec or None
+
+
+def ensure_h264_video(video_path: Path, work_dir: Path) -> Path:
+    """Re-encode the video to H.264 if it uses a codec (e.g. VP9, which
+    Instagram sometimes serves) that Telegram on iOS can't decode. Without
+    this, iPhones show a frozen frame with audio still playing instead of
+    the actual video."""
+    codec = get_video_codec(video_path)
+    if codec is None or codec in H264_COMPATIBLE_CODECS:
+        return video_path
+
+    output_path = work_dir / f"{video_path.stem}.h264.mp4"
+    command = [
+        "ffmpeg",
+        "-y",
+        "-i",
+        str(video_path),
+        "-c:v",
+        "libx264",
+        "-preset",
+        VIDEO_COMPRESSION_PRESET,
+        "-crf",
+        "20",
+        "-pix_fmt",
+        "yuv420p",
+        "-c:a",
+        "aac",
+        "-b:a",
+        f"{VIDEO_COMPRESSION_AUDIO_KBPS}k",
+        "-movflags",
+        "+faststart",
+        str(output_path),
+    ]
+
+    try:
+        subprocess.run(command, check=True, capture_output=True, timeout=900)
+    except (FileNotFoundError, subprocess.SubprocessError):
+        logger.exception("Failed to re-encode %s (codec=%s) to H.264", video_path, codec)
+        return video_path
+
+    return output_path if output_path.exists() else video_path
+
+
 def compress_video(video_path: Path, work_dir: Path) -> Optional[Path]:
     if not ENABLE_VIDEO_COMPRESSION:
         return None
@@ -405,7 +477,11 @@ def download_video(url: str, download_dir: Path) -> Tuple[Path, str]:
 
     ydl_opts = {
         "outtmpl": output_template,
-        "format": "bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best[ext=mp4]/best",
+        "format": (
+            "bestvideo[vcodec^=avc1][ext=mp4]+bestaudio[ext=m4a]/"
+            "best[vcodec^=avc1][ext=mp4]/"
+            "bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best[ext=mp4]/best"
+        ),
         "noplaylist": True,
         "quiet": True,
         "no_warnings": True,
@@ -432,6 +508,8 @@ def download_video(url: str, download_dir: Path) -> Tuple[Path, str]:
         if not candidates:
             raise FileNotFoundError("yt-dlp did not create a video file")
         video_path = candidates[0]
+
+    video_path = ensure_h264_video(video_path, download_dir)
 
     caption = build_reel_caption(info, url)
     return video_path, add_audio_warning_if_needed(caption, info)
