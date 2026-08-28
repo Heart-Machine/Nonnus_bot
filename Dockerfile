@@ -13,6 +13,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY bot.py .
+COPY assets/ ./assets/
 
 RUN useradd --create-home --uid 10001 appuser \
     && mkdir -p /app/data /app/cookies \

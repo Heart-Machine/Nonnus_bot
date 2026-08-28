@@ -1,5 +1,4 @@
 import asyncio
-import base64
 import hashlib
 from html import escape
 import json
@@ -92,42 +91,18 @@ INSTAGRAM_URL_RE = re.compile(
     re.IGNORECASE,
 )
 
-# A small "Готовлю видео..." placeholder photo (240x426 JPEG, generated once
-# with ffmpeg's drawtext filter) shown as the inline result while a Reel is
-# being downloaded, so the query doesn't have to be retyped once it's ready -
-# see get_placeholder_photo_file_id() and handle_chosen_inline_result().
-INLINE_PLACEHOLDER_IMAGE_B64 = (
-    "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"
-    "AAAAAAAf/9k="
-)
-INLINE_PLACEHOLDER_IMAGE_BYTES = base64.b64decode(INLINE_PLACEHOLDER_IMAGE_B64)
+# A small placeholder photo (assets/inline_placeholder.jpg: a download
+# icon plus "Готовлю видео..." caption text) shown as the inline result
+# while a Reel is being downloaded, so the query doesn't have to be
+# retyped once it's ready. Note: InlineQueryResultCachedPhoto's
+# title/description fields are NOT rendered by any major Telegram client
+# for photo-type inline results (confirmed via python-telegram-bot#2115
+# and telegramdesktop/tdesktop#7310) - the only text/graphics that
+# actually show up are whatever is baked into the image itself, which is
+# why this is a drawn icon rather than relying on API metadata fields.
+# See get_placeholder_photo_file_id() and handle_chosen_inline_result().
+INLINE_PLACEHOLDER_IMAGE_PATH = BASE_DIR / "assets" / "inline_placeholder.jpg"
+INLINE_PLACEHOLDER_IMAGE_BYTES = INLINE_PLACEHOLDER_IMAGE_PATH.read_bytes()
 
 
 logging.basicConfig(
