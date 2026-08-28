@@ -1,5 +1,4 @@
 import asyncio
-import base64
 import hashlib
 from html import escape
 import json
@@ -92,78 +91,18 @@ INSTAGRAM_URL_RE = re.compile(
     re.IGNORECASE,
 )
 
-# A small placeholder photo (240x426 JPEG: a download icon - arrow into a
-# tray - plus "Готовлю видео..." caption text, composed once with ffmpeg's
-# drawbox/drawtext filters) shown as the inline result while a Reel is being
-# downloaded, so the query doesn't have to be retyped once it's ready. Note:
-# InlineQueryResultCachedPhoto's title/description fields are NOT rendered
-# by any major Telegram client for photo-type inline results (confirmed via
-# python-telegram-bot#2115 and telegramdesktop/tdesktop#7310) - the only
-# text/graphics that actually show up are whatever is baked into the image
-# itself, which is why this is a drawn icon rather than relying on API
-# metadata fields. See get_placeholder_photo_file_id() and
-# handle_chosen_inline_result().
-INLINE_PLACEHOLDER_IMAGE_B64 = (
-    "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"
-    "qPVe8aUt+hPJhY11MXVaHHUXuS8MUiZuamazM6HXZ9vXij0jS7aN0adNSBMXWfqbpnhkz01iLxM2aqzwSyczl8tc86JlSsng"
-    "XxMzp0ZGqeh+voPifcsy6G360ET15sGuzJFZaTieSSe21lK2jeNuDlKZm/Evi6+jqMGC4i6r3xjXvfm6duVk5jj53ivGTvUa"
-    "11+Jajw6cfF7bM8zp4unTUp080lmWSaVbySSrVJItXWpa3dSlP8Atd31c8wMFsh3Rh5cNi8ZksHNdfGNaaKeLKKqsprVhUyu"
-    "KNqkvVqyfxv1a+Z61t+PFuODMyY2KSCtSehDj2mUlCarVlQIjXMtEq5HZKndSlJ1X1dBTgTF1YYd22vzLL5K2jxU+UoXqa/u"
-    "ctovGQ8pKkNwr9iFOjIj6PZZm4mM/kc7tmjicVhvypeQhRWr355a2YaFl37VZHOaZKKs/wByF9YmS6tUNqnRiPwMNSBmt11e"
-    "Pb+48TEilkaypai6i7jW3atThhig5qWjgWlM0a5UO/C3EzPorVjCZHPYGzHZVV23DUtWEqZ5VX554YXX+Jdes6I0oV18HEta"
-    "Uf8AFugrQGGrNU3TUkxtXHZnEpysVLj8HMi3JTswxyK4lQqkRHKmSLi6UpUjVPk+h53dzQZG7j3s4yL8qxyHigxMNiaJDRKd"
-    "1LZVn2pnlkW/HJL1qduoroLia3l2qD0pYU0OG0q3zUW/Eyvy63Bp4XkO3Ar2va5rvx+R85OxTtWly0qX5fA6UMmt4iSxwulD"
-    "MpXNkZlvxqZ1aP1a6MaYAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
-    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAP/2Q=="
-)
-INLINE_PLACEHOLDER_IMAGE_BYTES = base64.b64decode(INLINE_PLACEHOLDER_IMAGE_B64)
+# A small placeholder photo (assets/inline_placeholder.jpg: a download
+# icon plus "Готовлю видео..." caption text) shown as the inline result
+# while a Reel is being downloaded, so the query doesn't have to be
+# retyped once it's ready. Note: InlineQueryResultCachedPhoto's
+# title/description fields are NOT rendered by any major Telegram client
+# for photo-type inline results (confirmed via python-telegram-bot#2115
+# and telegramdesktop/tdesktop#7310) - the only text/graphics that
+# actually show up are whatever is baked into the image itself, which is
+# why this is a drawn icon rather than relying on API metadata fields.
+# See get_placeholder_photo_file_id() and handle_chosen_inline_result().
+INLINE_PLACEHOLDER_IMAGE_PATH = BASE_DIR / "assets" / "inline_placeholder.jpg"
+INLINE_PLACEHOLDER_IMAGE_BYTES = INLINE_PLACEHOLDER_IMAGE_PATH.read_bytes()
 
 
 logging.basicConfig(
