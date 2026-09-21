@@ -3,6 +3,8 @@
 .idea/
 __pycache__/
 *.pyc
+.pytest_cache/
+.ruff_cache/
 *.log
 .inline_cache.json
 downloads/

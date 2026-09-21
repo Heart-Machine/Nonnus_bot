@@ -909,9 +909,11 @@ def download_photo(entry: dict[str, Any], index: int, download_dir: Path) -> Opt
 
     try:
         request = urllib.request.Request(photo_url, headers=headers)
-        with urllib.request.urlopen(request, timeout=PHOTO_DOWNLOAD_TIMEOUT_SECONDS) as response:
-            with photo_path.open("wb") as photo_file:
-                shutil.copyfileobj(response, photo_file)
+        with (
+            urllib.request.urlopen(request, timeout=PHOTO_DOWNLOAD_TIMEOUT_SECONDS) as response,
+            photo_path.open("wb") as photo_file,
+        ):
+            shutil.copyfileobj(response, photo_file)
     except (OSError, ValueError):
         logger.exception("Failed to download photo %s of the post", index)
         return None
