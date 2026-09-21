@@ -56,6 +56,25 @@ https://www.instagram.com/reel/XXXXXXXXXXX/
 
 В группах бот отвечает только на сообщения, где есть его `@username`. Если у бота включен BotFather Privacy Mode, это нормальный режим: Telegram все равно доставляет боту сообщения с упоминанием.
 
+## Разработка
+
+Инструменты для разработки ставятся отдельно от рантайма:
+
+```powershell
+pip install -r requirements-dev.txt
+```
+
+Тесты и линтер:
+
+```powershell
+pytest
+ruff check .
+```
+
+Тесты не ходят в сеть и не обращаются к Telegram: то, что туда ходит, подменяется заглушками, а проверяется логика вокруг - какие элементы публикации содержат видео, в каком порядке получаются файлы, что уходит в Telegram и что попадает в кэш `file_id`.
+
+Настройки линтера лежат в `ruff.toml`. Включены правила, ловящие ошибки, а не оформление: `pycodestyle`, `pyflakes` и `bugbear`. Правила сортировки импортов и модернизации аннотаций выключены намеренно - в `bot.py` своя последовательная конвенция, и включение этих правил означало бы переоформление всего файла без пользы для поведения.
+
 ## Inline Mode
 
 Inline Mode позволяет вызвать бота прямо в любом чате Telegram:
@@ -144,17 +163,27 @@ PHOTO_DOWNLOAD_TIMEOUT_SECONDS=60
 
 Фото больше `PHOTO_MAX_FILE_SIZE_MB`, а также форматы, которые Telegram не принимает как фотографию (например WebP), пережимаются в JPEG со стороной не больше `PHOTO_MAX_DIMENSION`. Для этого нужен `ffmpeg` - тот же, что и для сжатия видео.
 
+## CI
+
+Workflow `.github/workflows/ci.yml` запускается на каждый pull request:
+
+1. Линтер и тесты на Python 3.13 - той же версии, что в `Dockerfile`.
+2. Сборка Docker-образа без публикации, чтобы поломка `Dockerfile` находилась до мержа, а не при деплое.
+
+Тот же workflow вызывается из деплоя через `workflow_call`, поэтому push напрямую в `main` не доедет до сервера, не пройдя те же проверки: job сборки образа ждет `CI`. Сборка образа на самом деплое не дублируется - этот job идет только на pull request.
+
 ## GitHub Actions Deploy
 
 В репозитории есть workflow `.github/workflows/deploy.yml`. Он запускается при push в `main` или вручную через `workflow_dispatch`.
 
 Что делает pipeline:
 
-1. Собирает Docker-образ.
-2. Публикует образ в GitHub Container Registry: `ghcr.io`.
-3. Подключается к серверу по SSH.
-4. Создает/обновляет `.env` и `docker-compose.yml` на сервере.
-5. Выполняет `docker compose pull` и `docker compose up -d`.
+1. Прогоняет CI: линтер, тесты.
+2. Собирает Docker-образ.
+3. Публикует образ в GitHub Container Registry: `ghcr.io`.
+4. Подключается к серверу по SSH.
+5. Создает/обновляет `.env` и `docker-compose.yml` на сервере.
+6. Выполняет `docker compose pull` и `docker compose up -d`.
 
 Добавьте в GitHub repository secrets:
 
