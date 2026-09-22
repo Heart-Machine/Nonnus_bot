@@ -112,6 +112,22 @@ jobs:
             APP_GID="$(id -g)"
 
             if [ -n "$GHCR_TOKEN" ]; then
+              # Keep the registry credentials out of the user's permanent
+              # docker config. Docker stores them base64-encoded rather than
+              # encrypted and says so in a warning; here they live in a
+              # directory this script creates and removes on the way out, so
+              # nothing is left behind even when the deploy fails partway.
+              DOCKER_CONFIG="$(mktemp -d)"
+              export DOCKER_CONFIG
+              trap 'rm -rf "$DOCKER_CONFIG"' EXIT
+
+              # DOCKER_CONFIG also moves where docker looks for CLI plugins, so
+              # a compose installed per-user rather than system-wide has to be
+              # carried across or `docker compose` below stops resolving.
+              if [ -d "$HOME/.docker/cli-plugins" ]; then
+                ln -s "$HOME/.docker/cli-plugins" "$DOCKER_CONFIG/cli-plugins"
+              fi
+
               echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USERNAME" --password-stdin
             fi
 
