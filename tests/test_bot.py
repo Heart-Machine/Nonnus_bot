@@ -38,6 +38,16 @@ import bot
             "https://www.instagram.com/reel/ABC123/?igsh=xyz",
             "https://www.instagram.com/reel/ABC123/?igsh=xyz",
         ),
+        # A post opened from a profile in the web app links with the username
+        # in front of the post type.
+        (
+            "смотри https://www.instagram.com/ilyuza_minnekhanova/p/DaLmfakDKfg/",
+            "https://www.instagram.com/ilyuza_minnekhanova/p/DaLmfakDKfg/",
+        ),
+        (
+            "https://www.instagram.com/some.one_2/reel/ABC123/",
+            "https://www.instagram.com/some.one_2/reel/ABC123/",
+        ),
     ],
 )
 def test_find_instagram_url_extracts_the_link(text, expected):
@@ -62,10 +72,25 @@ def test_find_instagram_url_returns_none_without_a_link(text):
         "https://instagram.com/p/ABC123/",
         "https://instagr.am/p/ABC123/",
         "https://www.instagram.com/p/ABC123/?igsh=xyz",
+        "https://www.instagram.com/someone/p/ABC123/",
+        "https://www.instagram.com/some.one_2/p/ABC123/?img_index=3",
+        "https://www.instagram.com/P/ABC123/",
     ],
 )
 def test_normalize_post_url_collapses_aliases_and_query(url):
     assert bot.normalize_post_url(url) == "https://www.instagram.com/p/ABC123/"
+
+
+def test_normalize_post_url_is_not_fooled_by_a_username_that_looks_like_a_type():
+    # Read from the end of the path: the code comes last, the type right
+    # before it, whatever the username says.
+    assert bot.normalize_post_url("https://www.instagram.com/reel/p/ABC123/") == "https://www.instagram.com/p/ABC123/"
+
+
+def test_a_profile_link_and_a_plain_link_share_one_cache_entry():
+    assert bot.inline_result_id("https://www.instagram.com/someone/p/ABC123/") == bot.inline_result_id(
+        "https://www.instagram.com/p/ABC123/"
+    )
 
 
 # --- what a post is made of -------------------------------------------

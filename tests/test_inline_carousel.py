@@ -35,6 +35,9 @@ def cached_post(items):
         ("https://instagr.am/p/ABC123", "p_ABC123"),
         ("https://www.instagram.com/p/ABC123/?igsh=xyz", "p_ABC123"),
         ("https://www.instagram.com/p/A_b-9/", "p_A_b-9"),
+        # Without the username dropped this would be three path segments and
+        # no payload at all - no "Посмотреть карусель" button.
+        ("https://www.instagram.com/someone/p/ABC123/", "p_ABC123"),
     ],
 )
 def test_post_start_payload_names_the_post(url, payload):
