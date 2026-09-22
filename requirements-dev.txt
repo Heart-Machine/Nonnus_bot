@@ -10,3 +10,6 @@
 pip-tools>=7.5,<8
 pytest>=8,<10
 ruff>=0.14,<1
+
+# Used by tools/check_action_inputs.py to read workflow and action manifests.
+pyyaml>=6,<7
