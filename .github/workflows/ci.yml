@@ -32,6 +32,18 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements-dev.txt
 
+      - name: Check the runtime lock is in sync
+        env:
+          # Keeps the generated header identical however pip-compile is
+          # invoked, so the diff below reacts only to real changes. Without
+          # --upgrade pip-compile keeps the pins that are already in the lock,
+          # so this fails when requirements.in was edited without regenerating,
+          # not every time something new lands on PyPI.
+          CUSTOM_COMPILE_COMMAND: pip-compile requirements.in
+        run: |
+          pip-compile --quiet --strip-extras requirements.in
+          git diff --exit-code requirements.txt
+
       - name: Lint
         run: ruff check .
 
