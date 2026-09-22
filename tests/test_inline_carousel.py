@@ -10,6 +10,7 @@ import asyncio
 from types import SimpleNamespace
 
 import pytest
+from telegram import Bot
 
 import bot
 
@@ -92,9 +93,10 @@ def test_carousel_keyboard_needs_a_bot_username():
     assert bot.carousel_keyboard(POST_URL, "") is None
 
 
-def test_every_carousel_result_carries_the_button():
+def test_every_per_file_carousel_result_carries_the_button():
     results = bot.build_inline_results(POST_URL, cached_post(CAROUSEL), BOT_USERNAME)
-    urls = [result.reply_markup.inline_keyboard[0][0].url for result in results]
+    per_file = [result for result in results if result.type != "article"]
+    urls = [result.reply_markup.inline_keyboard[0][0].url for result in per_file]
 
     assert urls == ["https://t.me/nonnus_bot?start=p_ABC123"] * 2
 
@@ -211,3 +213,88 @@ def test_start_with_a_forged_payload_falls_back_to_the_help_text(monkeypatch):
 
     assert delivered == []
     assert len(replies) == 1
+
+
+# --- the whole carousel as one message ----------------------------------
+
+
+def test_slideshow_keeps_every_file_in_carousel_order():
+    slideshow = bot.carousel_slideshow_message(POST_URL, cached_post(CAROUSEL))["blocks"][0]
+
+    assert slideshow["type"] == "slideshow"
+    assert slideshow["blocks"] == [
+        {"type": "photo", "photo": {"type": "photo", "media": "p1"}},
+        {"type": "video", "video": {"type": "video", "media": "v1"}},
+    ]
+
+
+def test_slideshow_caption_links_the_author_to_the_post():
+    caption = bot.carousel_slideshow_message(POST_URL, cached_post(CAROUSEL))["blocks"][0]["caption"]
+
+    assert caption == {"text": ["Пост ", {"type": "url", "text": "@someone", "url": POST_URL}]}
+
+
+def test_slideshow_caption_falls_back_to_the_url_without_an_author():
+    cached = {**cached_post(CAROUSEL), "title": "Instagram"}
+    caption = bot.carousel_slideshow_message(POST_URL, cached)["blocks"][0]["caption"]
+
+    assert caption["text"][1]["text"] == POST_URL
+
+
+def test_slideshow_keeps_caption_notes_as_plain_paragraphs():
+    # Notes were escaped for Telegram's HTML parse mode; a rich block wants
+    # the plain text back.
+    cached = {**cached_post(CAROUSEL), "caption": '<a href="x">@someone</a>\n\nВидео &quot;сжато&quot;.'}
+    blocks = bot.carousel_slideshow_message(POST_URL, cached)["blocks"]
+
+    assert blocks[1:] == [{"type": "paragraph", "text": 'Видео "сжато".'}]
+
+
+def test_no_slideshow_for_a_single_file():
+    assert bot.carousel_slideshow_message(POST_URL, cached_post(SINGLE)) is None
+
+
+def test_no_slideshow_when_a_file_went_out_as_a_document():
+    items = CAROUSEL + [{"type": "document", "file_id": "d1"}]
+
+    assert bot.carousel_slideshow_message(POST_URL, cached_post(items)) is None
+
+
+def test_no_slideshow_past_the_media_limit():
+    items = [{"type": "photo", "file_id": f"p{n}"} for n in range(bot.RICH_MESSAGE_MEDIA_LIMIT + 1)]
+
+    assert bot.carousel_slideshow_message(POST_URL, cached_post(items)) is None
+
+
+def test_carousel_results_open_with_the_slideshow():
+    results = bot.build_inline_results(POST_URL, cached_post(CAROUSEL), BOT_USERNAME)
+    slideshow = results[0]
+
+    assert [result.type for result in results] == ["article", "photo", "video"]
+    assert slideshow.title == "Вся карусель одним сообщением"
+    assert slideshow.id == f"{bot.inline_result_id(POST_URL)}-all"
+    assert slideshow.reply_markup is None
+
+
+def test_slideshow_result_serialises_the_way_the_bot_api_expects():
+    # Put through the same preparation answer_inline_query applies, so this is
+    # the JSON that actually goes out. It leans on that private method on
+    # purpose: the custom content class only works because this step leaves
+    # it alone, so a change there should fail loudly here.
+    result = bot.build_inline_results(POST_URL, cached_post(CAROUSEL), BOT_USERNAME)[0]
+    prepared = Bot("1:test")._insert_defaults_for_ilq_results(result).to_dict()
+
+    assert prepared["type"] == "article"
+    assert prepared["input_message_content"] == {
+        "rich_message": bot.carousel_slideshow_message(POST_URL, cached_post(CAROUSEL))
+    }
+
+
+def test_single_file_post_gets_no_slideshow_result():
+    results = bot.build_inline_results(POST_URL, cached_post(SINGLE), BOT_USERNAME)
+
+    assert [result.type for result in results] == ["video"]
+
+
+def test_choosing_the_slideshow_leaves_the_message_alone(monkeypatch):
+    assert choose(monkeypatch, f"{bot.inline_result_id(POST_URL)}-all", CAROUSEL) == []

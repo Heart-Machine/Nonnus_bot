@@ -1,6 +1,6 @@
 import asyncio
 import hashlib
-from html import escape
+from html import escape, unescape
 import json
 import logging
 import os
@@ -27,6 +27,7 @@ from telegram import (
     InputMediaDocument,
     InputMediaPhoto,
     InputMediaVideo,
+    InputMessageContent,
     InputTextMessageContent,
     Update,
 )
@@ -99,9 +100,11 @@ UPLOAD_TIMEOUTS: dict[str, Any] = {
     "connect_timeout": 30,
     "pool_timeout": 30,
 }
+# Bumped to 5: captions now start with "Пост" or "Рилс", and entries cached
+# before that would keep the old caption for as long as they stay cached.
 # Bumped to 4: a cache entry now holds a list of media items instead of one
 # file_id, so entries written by older versions can't be reused.
-INLINE_CACHE_VERSION = "4"
+INLINE_CACHE_VERSION = "5"
 INLINE_CACHE_FILE = Path(os.getenv("INLINE_CACHE_FILE", str(BASE_DIR / ".inline_cache.json"))).expanduser()
 if not INLINE_CACHE_FILE.is_absolute():
     INLINE_CACHE_FILE = BASE_DIR / INLINE_CACHE_FILE
@@ -303,11 +306,80 @@ def build_input_media(kind: str, media: Any, caption: Optional[str]) -> InputMed
     )
 
 
+# Telegram's limit on media in a single rich message. An Instagram carousel
+# tops out at 20, so this only matters if that ever changes.
+RICH_MESSAGE_MEDIA_LIMIT = 50
+CAROUSEL_SLIDESHOW_TITLE = "Вся карусель одним сообщением"
+
+
+class InputRichMessageContent(InputMessageContent):
+    """Bot API 10.1 InputRichMessageContent, which python-telegram-bot does
+    not know about yet: it stops at Bot API 10.0, and the pull requests adding
+    rich messages were closed unmerged.
+
+    It rides on the library's own InlineQueryResultArticle and serialises to
+    exactly {"rich_message": {...}}. answer_inline_query only reaches into the
+    content of a result for parse_mode, which this has none of, so it passes
+    through untouched. Replace it with the library's class once it has one."""
+
+    __slots__ = ("rich_message",)
+
+    def __init__(self, rich_message: dict[str, Any], *, api_kwargs: Optional[dict[str, Any]] = None) -> None:
+        super().__init__(api_kwargs=api_kwargs)
+        with self._unfrozen():
+            self.rich_message = rich_message
+
+
+def carousel_slideshow_message(url: str, cached_result: dict[str, Any]) -> Optional[dict[str, Any]]:
+    """The whole carousel as one rich message: a slideshow of every file in
+    carousel order, with the author link as its caption.
+
+    This is what gets a carousel into a chat through inline mode in one piece.
+    An inline message cannot be an album, but it can be a rich message, and
+    Telegram only allows previously uploaded files in one - which every item
+    here already is, by its file_id in the storage chat.
+
+    Only photos and videos can be slides. A file Telegram refused as media and
+    took as a document cannot, so a carousel holding one is not offered as a
+    slideshow at all rather than shown with a file missing."""
+    items = cached_result.get("items") or []
+    if len(items) < 2 or len(items) > RICH_MESSAGE_MEDIA_LIMIT:
+        return None
+
+    slides = []
+    for item in items:
+        kind = item.get("type")
+        if kind not in ("photo", "video"):
+            return None
+        slides.append({"type": kind, kind: {"type": kind, "media": item["file_id"]}})
+
+    post_url = normalize_post_url(url)
+    author = cached_result.get("title")
+    link_text = author if author and author != "Instagram" else post_url
+    blocks: list[dict[str, Any]] = [
+        {
+            "type": "slideshow",
+            "blocks": slides,
+            # A slideshow is always a carousel, so always a post.
+            "caption": {"text": ["Пост ", {"type": "url", "text": link_text, "url": post_url}]},
+        }
+    ]
+
+    # Notes the caption picked up after the author link - that a video was
+    # compressed, say - were escaped for Telegram's HTML parse mode. A rich
+    # message block takes plain text, so they go back to it, one paragraph each.
+    for note in (cached_result.get("caption") or "").split("\n\n")[1:]:
+        blocks.append({"type": "paragraph", "text": unescape(note)})
+
+    return {"blocks": blocks}
+
+
 def build_inline_results(url: str, cached_result: dict[str, Any], bot_username: str = "") -> list[InlineQueryResult]:
-    """One inline result per file in the post. Telegram has no inline
-    equivalent of an album, so a carousel is offered as a list the user picks
-    from rather than as a single result - each one carrying a button to the
-    whole album in a private chat with the bot."""
+    """One inline result per file in the post. For a carousel the list opens
+    with the whole post as a single slideshow message; the per-file results
+    after it stay as the fallback for a client that renders rich messages
+    poorly, each carrying a button to the whole album in a private chat with
+    the bot."""
     items = cached_result.get("items") or []
     base_caption = cached_result.get("caption") or escape(normalize_post_url(url))
     title = cached_result.get("title") or "Instagram"
@@ -315,6 +387,20 @@ def build_inline_results(url: str, cached_result: dict[str, Any], bot_username: 
     reply_markup = carousel_keyboard(url, bot_username) if total > 1 else None
 
     results: list[InlineQueryResult] = []
+    slideshow = carousel_slideshow_message(url, cached_result)
+    if slideshow is not None:
+        # No button: this one already is the whole carousel. Without a button
+        # Telegram also sends no inline_message_id when it is chosen, so it
+        # never reaches handle_chosen_inline_result.
+        results.append(
+            InlineQueryResultArticle(
+                id=f"{inline_result_id(url)}-all",
+                title=CAROUSEL_SLIDESHOW_TITLE,
+                description=f"{title}, слайдов: {total}",
+                input_message_content=InputRichMessageContent(slideshow),
+            )
+        )
+
     for index, item in enumerate(items):
         result_id = inline_item_result_id(url, index, total)
         item_title = title if total == 1 else f"{title} - {index + 1}/{total}"
@@ -479,7 +565,16 @@ def username_from_instagram_profile_url(value: Any) -> Optional[str]:
     return normalize_instagram_username(username)
 
 
-def build_post_caption(info: dict[str, Any], fallback_url: str) -> str:
+def post_label(items: list["MediaItem"]) -> str:
+    """"Рилс" for a lone video, "Пост" for anything else - a photo or a carousel.
+
+    Decided by what was downloaded rather than by the link: Instagram hands out
+    /p/ links to reels as readily as /reel/ ones, while a single video is what
+    it publishes as a reel either way."""
+    return "Рилс" if len(items) == 1 and items[0].is_video else "Пост"
+
+
+def build_post_caption(info: dict[str, Any], fallback_url: str, label: str = "Пост") -> str:
     post_url = info.get("webpage_url") or fallback_url
     author = next(
         (
@@ -502,9 +597,9 @@ def build_post_caption(info: dict[str, Any], fallback_url: str) -> str:
     )
 
     if author:
-        return f'<a href="{escape(str(post_url), quote=True)}">{escape(author)}</a>'
+        return f'{escape(label)} <a href="{escape(str(post_url), quote=True)}">{escape(author)}</a>'
 
-    return escape(str(post_url))
+    return f"{escape(label)} {escape(str(post_url))}"
 
 
 def video_file_has_audio(video_path: Path) -> bool:
@@ -1044,7 +1139,7 @@ def download_post(url: str, download_dir: Path) -> Tuple[list[MediaItem], str]:
     if not items:
         raise NoMediaInPostError("Failed to download any media from this post.")
 
-    caption = build_post_caption(info, url)
+    caption = build_post_caption(info, url, post_label(items))
     if len(items) == 1 and items[0].is_video:
         # Only meaningful for a lone video: in a carousel a silent clip next
         # to photos is normal, not a symptom of a stripped audio track.
