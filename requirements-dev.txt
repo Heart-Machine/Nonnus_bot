@@ -1,4 +1,12 @@
+# Development tooling. Unlike requirements.txt this file is deliberately not
+# locked: it never ships anywhere, and pip-compile resolves for the platform it
+# runs on, so a lock generated on Windows would carry colorama - pytest pulls
+# it in there and not on Linux - and disagree with CI on every check.
+#
+# The runtime pins arrive through the lock below, so the tests run against
+# exactly the versions the image is built with.
 -r requirements.txt
 
+pip-tools>=7.5,<8
 pytest>=8,<10
 ruff>=0.14,<1
