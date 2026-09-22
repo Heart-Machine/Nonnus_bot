@@ -1487,13 +1487,39 @@ async def prepare_inline_post(url: str, context: ContextTypes.DEFAULT_TYPE) -> d
         shutil.rmtree(temp_dir, ignore_errors=True)
 
 
-async def send_prepared_result(message, cached_result: dict[str, Any]) -> None:
+async def send_rich_message(message, rich_message: dict[str, Any]) -> None:
+    """sendRichMessage, which python-telegram-bot has no method for yet, sent
+    the way Message.reply_* sends everything else: quoting the message it
+    answers outside a private chat, and into the same forum topic. The library
+    JSON-encodes a dict parameter on its own, so rich_message goes in as is."""
+    api_kwargs: dict[str, Any] = {"chat_id": message.chat_id, "rich_message": rich_message}
+    if message.chat.type != "private":
+        api_kwargs["reply_parameters"] = {"message_id": message.message_id}
+    if message.is_topic_message and message.message_thread_id:
+        api_kwargs["message_thread_id"] = message.message_thread_id
+
+    await message.get_bot().do_api_request("sendRichMessage", api_kwargs=api_kwargs, **UPLOAD_TIMEOUTS)
+
+
+async def send_prepared_result(message, cached_result: dict[str, Any], url: str) -> None:
     """Send an already-uploaded (storage-chat) post by file_id, without
-    re-downloading or re-uploading the bytes. A carousel goes out as one or
-    more albums, in the order the post shows it."""
+    re-downloading or re-uploading the bytes.
+
+    A carousel goes out as a single slideshow message - one message however
+    long the post, against one album per ten files. If Telegram turns the
+    slideshow down it falls back to albums, as does a carousel that cannot be
+    a slideshow at all: one holding a file Telegram only took as a document."""
     items = cached_result.get("items") or []
     if not items:
         raise RuntimeError("Prepared result has no media")
+
+    slideshow = carousel_slideshow_message(url, cached_result) if len(items) > 1 else None
+    if slideshow is not None:
+        try:
+            await send_rich_message(message, slideshow)
+            return
+        except BadRequest:
+            logger.exception("Telegram refused the carousel slideshow for %s, sending albums instead", url)
 
     caption = cached_result.get("caption", "")
     if len(items) == 1:
@@ -1807,7 +1833,7 @@ async def deliver_post(message, url: str, context: ContextTypes.DEFAULT_TYPE) ->
     cached_result = get_cached_inline_result(url)
     if cached_result:
         try:
-            await send_prepared_result(message, cached_result)
+            await send_prepared_result(message, cached_result, url)
         except TelegramError:
             logger.exception("Failed to resend cached media for %s, falling back to a fresh download", url)
         else:
@@ -1843,7 +1869,7 @@ async def deliver_post(message, url: str, context: ContextTypes.DEFAULT_TYPE) ->
             return
 
         try:
-            await send_prepared_result(message, cached_result)
+            await send_prepared_result(message, cached_result, url)
         except TelegramError:
             logger.exception("Failed to deliver prepared media for %s", url)
             await status_message.edit_text(
