@@ -51,7 +51,7 @@ jobs:
         run: pytest -q
 
   docker:
-    name: Build Docker image
+    name: Build image
     runs-on: ubuntu-latest
     # Only on pull requests: when this workflow is called by the deploy run,
     # that run builds and pushes the real image itself a moment later.
