@@ -1,0 +1,30 @@
+version: 2
+
+updates:
+  # Actions are pinned by commit SHA, which is what makes the supply chain
+  # predictable - but a pin nobody moves is a pin that rots. Dependabot updates
+  # the SHA and rewrites the version comment next to it, which is the half that
+  # makes pinning sustainable.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]
+
+  # Runtime pins live in the generated requirements.txt. Dependabot understands
+  # pip-compile output and regenerates it rather than editing pins by hand.
+  - package-ecosystem: pip
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      python:
+        patterns: ["*"]
+
+  # The base image is pinned by digest, so this keeps that digest moving.
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: monthly
