@@ -48,6 +48,14 @@ jobs:
           pip-compile --quiet --strip-extras requirements.in
           git diff --exit-code requirements.txt
 
+      - name: Check workflow inputs against the actions they call
+        env:
+          # Only lifts the API rate limit for reading each action manifest.
+          # This is the automatic read-only token; the check needs nothing
+          # else, which is what lets it run on a pull request from a fork.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python tools/check_action_inputs.py
+
       - name: Lint
         run: ruff check .
 
