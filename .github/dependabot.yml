@@ -5,6 +5,12 @@ updates:
   # predictable - but a pin nobody moves is a pin that rots. Dependabot updates
   # the SHA and rewrites the version comment next to it, which is the half that
   # makes pinning sustainable.
+  #
+  # A SHA carries no version range, so these updates cross major versions.
+  # That is the trade for pinning, and it means the diff is worth reading
+  # rather than rubber-stamping - especially for the two actions below that
+  # only ever run in the deploy workflow, where a pull request never exercises
+  # them.
   - package-ecosystem: github-actions
     directory: /
     schedule:
@@ -15,16 +21,35 @@ updates:
 
   # Runtime pins live in the generated requirements.txt. Dependabot understands
   # pip-compile output and regenerates it rather than editing pins by hand.
+  #
+  # lockfile-only keeps it to that. Without it Dependabot also raises the
+  # floors in requirements.in and requirements-dev.txt to whatever happens to
+  # be current, which is churn: those constraints state what the project needs,
+  # not what is installed today.
   - package-ecosystem: pip
     directory: /
     schedule:
       interval: weekly
+    versioning-strategy: lockfile-only
     groups:
       python:
         patterns: ["*"]
 
-  # The base image is pinned by digest, so this keeps that digest moving.
+  # The base image is pinned by digest, so this keeps that digest moving within
+  # the Python line the project is on.
+  #
+  # Moving to a new line is not a bump. 3.13 -> 3.14 registers as a semver
+  # minor here, but changing the interpreter has to move the Dockerfile, the
+  # python-version in ci.yml and the README together - otherwise CI keeps
+  # testing one version while the server runs another, and the green tick stops
+  # meaning anything. That is a deliberate change, so it stays out of the
+  # weekly noise.
   - package-ecosystem: docker
     directory: /
     schedule:
       interval: monthly
+    ignore:
+      - dependency-name: python
+        update-types:
+          - version-update:semver-major
+          - version-update:semver-minor
