@@ -111,8 +111,10 @@ INLINE_CACHE_FILE = Path(os.getenv("INLINE_CACHE_FILE", str(BASE_DIR / ".inline_
 if not INLINE_CACHE_FILE.is_absolute():
     INLINE_CACHE_FILE = BASE_DIR / INLINE_CACHE_FILE
 
+# The web app links a post opened from a profile as /<username>/p/<code>/, so
+# an optional username segment may come before the post type.
 INSTAGRAM_URL_RE = re.compile(
-    r"https?://(?:www\.)?(?:instagram\.com|instagr\.am)/(?:reel|reels|p|tv)/[A-Za-z0-9_\-]+/?"
+    r"https?://(?:www\.)?(?:instagram\.com|instagr\.am)/(?:[A-Za-z0-9._]{1,30}/)?(?:reel|reels|p|tv)/[A-Za-z0-9_\-]+/?"
     r"(?:\?[^\s.,!?;:()\[\]{}<>'\"]+)?",
     re.IGNORECASE,
 )
@@ -143,9 +145,22 @@ def find_instagram_url(text: str) -> Optional[str]:
     return match.group(0) if match else None
 
 
+INSTAGRAM_POST_TYPES = ("p", "reel", "reels", "tv")
+
+
 def normalize_post_url(url: str) -> str:
-    parsed_url = urlparse(url)
-    path = parsed_url.path.rstrip("/") + "/"
+    """The canonical address of a post: https://www.instagram.com/<type>/<code>/.
+
+    A username segment before the type is dropped, so a post links the same
+    whether it was shared from a profile or not - it is one cache entry, not
+    two, and one deep link. The type and code are read from the end of the
+    path rather than the start, which keeps a username that happens to be
+    "p" or "reel" from being taken for the type."""
+    parts = [part for part in urlparse(url).path.split("/") if part]
+    if len(parts) >= 2 and parts[-2].lower() in INSTAGRAM_POST_TYPES:
+        return f"https://www.instagram.com/{parts[-2].lower()}/{parts[-1]}/"
+
+    path = urlparse(url).path.rstrip("/") + "/"
     return f"https://www.instagram.com{path}"
 
 
