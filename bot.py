@@ -8,19 +8,24 @@ import re
 import shutil
 import subprocess
 import tempfile
+import urllib.request
+from contextlib import ExitStack
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Optional, Tuple
+from typing import Any, Iterator, Optional, Tuple
 from urllib.parse import urlparse
 
 from dotenv import load_dotenv
 from telegram import (
     InlineKeyboardButton,
     InlineKeyboardMarkup,
+    InlineQueryResult,
     InlineQueryResultArticle,
     InlineQueryResultCachedDocument,
     InlineQueryResultCachedPhoto,
     InlineQueryResultCachedVideo,
     InputMediaDocument,
+    InputMediaPhoto,
     InputMediaVideo,
     InputTextMessageContent,
     Update,
@@ -80,7 +85,23 @@ VIDEO_COMPRESSION_AUDIO_KBPS = int(os.getenv("VIDEO_COMPRESSION_AUDIO_KBPS", "96
 VIDEO_COMPRESSION_PRESET = os.getenv("VIDEO_COMPRESSION_PRESET", "veryfast").strip() or "veryfast"
 VIDEO_COMPRESSION_MIN_VIDEO_KBPS = int(os.getenv("VIDEO_COMPRESSION_MIN_VIDEO_KBPS", "250"))
 STORAGE_CHAT_ID = os.getenv("STORAGE_CHAT_ID", "").strip()
-INLINE_CACHE_VERSION = "3"
+# Telegram's sendPhoto limit sits far below the video one, and Instagram
+# serves photos as full-size originals, so photos need their own ceiling.
+PHOTO_MAX_FILE_SIZE_MB = int(os.getenv("PHOTO_MAX_FILE_SIZE_MB", "10"))
+PHOTO_MAX_FILE_SIZE_BYTES = PHOTO_MAX_FILE_SIZE_MB * 1024 * 1024
+PHOTO_MAX_DIMENSION = int(os.getenv("PHOTO_MAX_DIMENSION", "2560"))
+PHOTO_DOWNLOAD_TIMEOUT_SECONDS = int(os.getenv("PHOTO_DOWNLOAD_TIMEOUT_SECONDS", "60"))
+# Telegram accepts at most 10 items in a single album.
+MEDIA_GROUP_LIMIT = 10
+UPLOAD_TIMEOUTS: dict[str, Any] = {
+    "read_timeout": UPLOAD_TIMEOUT_SECONDS,
+    "write_timeout": UPLOAD_TIMEOUT_SECONDS,
+    "connect_timeout": 30,
+    "pool_timeout": 30,
+}
+# Bumped to 4: a cache entry now holds a list of media items instead of one
+# file_id, so entries written by older versions can't be reused.
+INLINE_CACHE_VERSION = "4"
 INLINE_CACHE_FILE = Path(os.getenv("INLINE_CACHE_FILE", str(BASE_DIR / ".inline_cache.json"))).expanduser()
 if not INLINE_CACHE_FILE.is_absolute():
     INLINE_CACHE_FILE = BASE_DIR / INLINE_CACHE_FILE
@@ -117,17 +138,17 @@ def find_instagram_url(text: str) -> Optional[str]:
     return match.group(0) if match else None
 
 
-def normalize_reel_url(url: str) -> str:
+def normalize_post_url(url: str) -> str:
     parsed_url = urlparse(url)
     path = parsed_url.path.rstrip("/") + "/"
     return f"https://www.instagram.com{path}"
 
 
 def inline_result_id(url: str) -> str:
-    return hashlib.sha256(f"{INLINE_CACHE_VERSION}:{normalize_reel_url(url)}".encode("utf-8")).hexdigest()[:32]
+    return hashlib.sha256(f"{INLINE_CACHE_VERSION}:{normalize_post_url(url)}".encode("utf-8")).hexdigest()[:32]
 
 
-def load_inline_cache() -> dict[str, dict[str, str]]:
+def load_inline_cache() -> dict[str, dict[str, Any]]:
     if not INLINE_CACHE_FILE.exists():
         return {}
 
@@ -141,25 +162,29 @@ def load_inline_cache() -> dict[str, dict[str, str]]:
         return {}
 
 
-def save_inline_cache(cache: dict[str, dict[str, str]]) -> None:
+def save_inline_cache(cache: dict[str, dict[str, Any]]) -> None:
     INLINE_CACHE_FILE.write_text(
         json.dumps(cache, ensure_ascii=False, indent=2, sort_keys=True),
         encoding="utf-8",
     )
 
 
-def get_cached_inline_result(url: str) -> Optional[dict[str, str]]:
-    cached_result = load_inline_cache().get(normalize_reel_url(url))
-    if cached_result and cached_result.get("version") == INLINE_CACHE_VERSION:
+def get_cached_inline_result(url: str) -> Optional[dict[str, Any]]:
+    cached_result = load_inline_cache().get(normalize_post_url(url))
+    if (
+        cached_result
+        and cached_result.get("version") == INLINE_CACHE_VERSION
+        and cached_result.get("items")
+    ):
         return cached_result
 
     return None
 
 
-def save_cached_inline_result(url: str, cached_result: dict[str, str]) -> None:
+def save_cached_inline_result(url: str, cached_result: dict[str, Any]) -> None:
     cache = load_inline_cache()
     cached_result["version"] = INLINE_CACHE_VERSION
-    cache[normalize_reel_url(url)] = cached_result
+    cache[normalize_post_url(url)] = cached_result
     save_inline_cache(cache)
 
 
@@ -178,30 +203,111 @@ def title_from_caption(caption: str) -> str:
     if match:
         return match.group(1)
 
-    return "Instagram Reel"
+    return "Instagram"
 
 
-def build_inline_result(url: str, cached_result: dict[str, str]) -> InlineQueryResultCachedVideo | InlineQueryResultCachedDocument:
-    result_id = inline_result_id(url)
-    title = cached_result.get("title") or "Instagram Reel"
-    caption = cached_result.get("caption") or escape(normalize_reel_url(url))
+def chunked(items: list[Any], size: int) -> Iterator[list[Any]]:
+    for start in range(0, len(items), size):
+        yield items[start:start + size]
 
-    if cached_result.get("type") == "document":
-        return InlineQueryResultCachedDocument(
-            id=result_id,
-            title=title,
-            document_file_id=cached_result["file_id"],
-            caption=caption,
-            parse_mode=ParseMode.HTML,
-        )
 
-    return InlineQueryResultCachedVideo(
-        id=result_id,
-        video_file_id=cached_result["file_id"],
-        title=title,
+def add_carousel_note_if_needed(caption: str, index: int, total: int) -> str:
+    """An inline message carries exactly one medium, so when a single file of
+    a carousel is sent that way, the caption spells out what else is in the
+    post and how to get it."""
+    if total <= 1:
+        return caption
+
+    note = (
+        f"Файл {index + 1} из {total} в этой публикации. "
+        "Повтори inline-запрос, чтобы отправить остальные."
+    )
+    return f"{caption}\n\n{escape(note)}"
+
+
+def inline_item_result_id(url: str, index: int, total: int) -> str:
+    """A single-file post keeps the bare per-URL id - the same one the
+    placeholder uses - while a carousel appends the item's position, so every
+    result in one answer stays distinct and handle_chosen_inline_result can
+    tell which file the user picked."""
+    base_id = inline_result_id(url)
+    return base_id if total == 1 else f"{base_id}-{index}"
+
+
+def inline_item_index(result_id: str, url: str) -> int:
+    base_id = inline_result_id(url)
+    if result_id.startswith(f"{base_id}-"):
+        suffix = result_id[len(base_id) + 1:]
+        if suffix.isdigit():
+            return int(suffix)
+
+    return 0
+
+
+def build_input_media(kind: str, media: Any, caption: Optional[str]) -> InputMediaPhoto | InputMediaDocument | InputMediaVideo:
+    if kind == "photo":
+        return InputMediaPhoto(media=media, caption=caption, parse_mode=ParseMode.HTML)
+
+    if kind == "document":
+        return InputMediaDocument(media=media, caption=caption, parse_mode=ParseMode.HTML)
+
+    return InputMediaVideo(
+        media=media,
         caption=caption,
         parse_mode=ParseMode.HTML,
+        supports_streaming=True,
     )
+
+
+def build_inline_results(url: str, cached_result: dict[str, Any]) -> list[InlineQueryResult]:
+    """One inline result per file in the post. Telegram has no inline
+    equivalent of an album, so a carousel is offered as a list the user picks
+    from rather than as a single result."""
+    items = cached_result.get("items") or []
+    base_caption = cached_result.get("caption") or escape(normalize_post_url(url))
+    title = cached_result.get("title") or "Instagram"
+    total = len(items)
+
+    results: list[InlineQueryResult] = []
+    for index, item in enumerate(items):
+        result_id = inline_item_result_id(url, index, total)
+        item_title = title if total == 1 else f"{title} - {index + 1}/{total}"
+        caption = add_carousel_note_if_needed(base_caption, index, total)
+        file_id = item["file_id"]
+        kind = item.get("type")
+
+        if kind == "photo":
+            results.append(
+                InlineQueryResultCachedPhoto(
+                    id=result_id,
+                    photo_file_id=file_id,
+                    title=item_title,
+                    caption=caption,
+                    parse_mode=ParseMode.HTML,
+                )
+            )
+        elif kind == "document":
+            results.append(
+                InlineQueryResultCachedDocument(
+                    id=result_id,
+                    document_file_id=file_id,
+                    title=item_title,
+                    caption=caption,
+                    parse_mode=ParseMode.HTML,
+                )
+            )
+        else:
+            results.append(
+                InlineQueryResultCachedVideo(
+                    id=result_id,
+                    video_file_id=file_id,
+                    title=item_title,
+                    caption=caption,
+                    parse_mode=ParseMode.HTML,
+                )
+            )
+
+    return results
 
 
 def build_inline_article(result_id: str, title: str, description: str, message_text: str) -> InlineQueryResultArticle:
@@ -255,7 +361,7 @@ def build_inline_placeholder_result(url: str, photo_file_id: str) -> InlineQuery
         description="Нажми, чтобы отправить — видео появится тут само через несколько секунд",
         caption="Готовлю видео, подожди немного — сообщение обновится само...",
         reply_markup=InlineKeyboardMarkup(
-            [[InlineKeyboardButton("Открыть в Instagram", url=normalize_reel_url(url))]]
+            [[InlineKeyboardButton("Открыть в Instagram", url=normalize_post_url(url))]]
         ),
     )
 
@@ -324,8 +430,8 @@ def username_from_instagram_profile_url(value: Any) -> Optional[str]:
     return normalize_instagram_username(username)
 
 
-def build_reel_caption(info: dict[str, Any], fallback_url: str) -> str:
-    reel_url = info.get("webpage_url") or fallback_url
+def build_post_caption(info: dict[str, Any], fallback_url: str) -> str:
+    post_url = info.get("webpage_url") or fallback_url
     author = next(
         (
             username
@@ -337,6 +443,7 @@ def build_reel_caption(info: dict[str, Any], fallback_url: str) -> str:
                 username_from_instagram_profile_url(info.get("profile_url")),
                 normalize_instagram_username(info.get("username")),
                 normalize_instagram_username(info.get("owner_username")),
+                normalize_instagram_username(info.get("channel")),
                 normalize_instagram_username(info.get("author_id")),
                 normalize_instagram_username(info.get("uploader_id")),
             )
@@ -346,9 +453,9 @@ def build_reel_caption(info: dict[str, Any], fallback_url: str) -> str:
     )
 
     if author:
-        return f'<a href="{escape(str(reel_url), quote=True)}">{escape(author)}</a>'
+        return f'<a href="{escape(str(post_url), quote=True)}">{escape(author)}</a>'
 
-    return escape(str(reel_url))
+    return escape(str(post_url))
 
 
 def video_file_has_audio(video_path: Path) -> bool:
@@ -383,7 +490,7 @@ def add_audio_warning_if_needed(caption: str, video_path: Path) -> str:
     if video_file_has_audio(video_path):
         return caption
 
-    warning = "Звук недоступен: Instagram не отдал аудиодорожку для этого Reel."
+    warning = "Звук недоступен: Instagram не отдал аудиодорожку для этого видео."
     return f"{caption}\n\n{escape(warning)}"
 
 
@@ -617,74 +724,319 @@ def add_compression_note_if_needed(caption: str, compressed: bool) -> str:
     return f"{caption}\n\n{escape(note)}"
 
 
-class NoVideoInPostError(Exception):
-    """Raised when the linked Instagram post has no video track at all
-    (a photo post, or a carousel made only of photos) - distinct from a
-    genuine download failure so the user gets an accurate message instead
-    of being told to add cookies."""
+class NoMediaInPostError(Exception):
+    """Raised when the linked Instagram post yields no downloadable media at
+    all - neither a video track nor a photo - distinct from a genuine
+    download failure so the user gets an accurate message instead of being
+    told to add cookies."""
 
 
-def download_video(url: str, download_dir: Path) -> Tuple[Path, str]:
-    # Canonicalize to instagram.com: yt-dlp's Instagram extractor only
-    # recognizes that domain, not aliases like instagr.am.
-    url = normalize_reel_url(url)
-    output_template = str(download_dir / "%(id)s.%(ext)s")
-    cookiefile = None
+VIDEO_FILE_EXTENSIONS = {".mp4", ".mkv", ".webm", ".mov", ".m4v"}
+TELEGRAM_PHOTO_EXTENSIONS = {".jpg", ".jpeg", ".png"}
+DOWNLOADABLE_PHOTO_EXTENSIONS = TELEGRAM_PHOTO_EXTENSIONS | {".webp", ".heic"}
+# Instagram's CDN serves signed media URLs to anyone, but it still wants a
+# plausible browser request - an unadorned urllib call gets a 403.
+INSTAGRAM_IMAGE_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+    ),
+    "Referer": "https://www.instagram.com/",
+}
+
+
+@dataclass
+class MediaItem:
+    """One downloaded file from a post: a Reel or feed video, or a photo
+    from a single-photo post or a carousel."""
+
+    path: Path
+    kind: str  # "photo" or "video"
+
+    @property
+    def is_video(self) -> bool:
+        return self.kind == "video"
+
+
+def build_ydl_opts(download_dir: Path) -> dict[str, Any]:
+    ydl_opts: dict[str, Any] = {
+        "outtmpl": str(download_dir / "%(id)s.%(ext)s"),
+        "quiet": True,
+        "no_warnings": True,
+        # Instagram extracts a carousel as a playlist of children, and we
+        # want every child, not just the first one.
+        "noplaylist": False,
+    }
+
     if COOKIES_FILE:
         source_cookiefile = Path(COOKIES_FILE)
         cookiefile = download_dir / source_cookiefile.name
         shutil.copyfile(source_cookiefile, cookiefile)
-
-    ydl_opts = {
-        "outtmpl": output_template,
-        "format": (
-            "bestvideo[vcodec^=avc1][ext=mp4]+bestaudio[ext=m4a]/"
-            "best[vcodec^=avc1][ext=mp4]/"
-            "bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best[ext=mp4]/best"
-        ),
-        "noplaylist": True,
-        "quiet": True,
-        "no_warnings": True,
-        "merge_output_format": "mp4",
-    }
-
-    if cookiefile:
         ydl_opts["cookiefile"] = str(cookiefile)
 
-    try:
-        with YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=True)
-            filename = ydl.prepare_filename(info)
-    except ExtractorError as error:
-        if "no video formats" in str(error).lower():
-            raise NoVideoInPostError(
-                "This Instagram post has no video track (photo post or a photo-only carousel)."
-            ) from error
-        raise
+    return ydl_opts
 
-    video_path = Path(filename)
-    requested_downloads = info.get("requested_downloads") or []
-    for requested_download in requested_downloads:
+
+def probe_post(url: str, download_dir: Path) -> dict[str, Any]:
+    """Metadata-only pass over the post.
+
+    yt-dlp builds no `formats` for Instagram photos - their URLs only ever
+    surface as thumbnails - so a plain download run dies with "No video
+    formats found" on any post that isn't pure video. ignore_no_formats_error
+    lets those entries through, which is what makes photo posts and mixed
+    carousels visible to us at all."""
+    ydl_opts = build_ydl_opts(download_dir)
+    ydl_opts["ignore_no_formats_error"] = True
+
+    with YoutubeDL(ydl_opts) as ydl:
+        info = ydl.extract_info(url, download=False)
+
+    if not info:
+        raise NoMediaInPostError("Instagram returned nothing for this post")
+
+    return info
+
+
+def post_entries(info: dict[str, Any]) -> list[dict[str, Any]]:
+    """Carousel children in display order, or the post itself when it holds
+    a single medium."""
+    entries = info.get("entries")
+    if entries is None:
+        return [info]
+
+    return [entry for entry in list(entries) if entry]
+
+
+def entry_has_video(entry: dict[str, Any]) -> bool:
+    return any(fmt.get("url") for fmt in entry.get("formats") or [])
+
+
+def downloaded_entry_path(entry: dict[str, Any]) -> Optional[Path]:
+    for requested_download in entry.get("requested_downloads") or []:
         filepath = requested_download.get("filepath") or requested_download.get("_filename")
         if filepath and Path(filepath).exists():
-            video_path = Path(filepath)
+            return Path(filepath)
+
+    return None
+
+
+def download_post_videos(
+    url: str,
+    download_dir: Path,
+    entries: list[dict[str, Any]],
+    video_indices: list[int],
+) -> dict[int, Path]:
+    """Download only the carousel positions that actually carry a video.
+
+    playlist_items is 1-based and keeps the photo entries out of the run
+    entirely, so the format selector never has to cope with an entry that has
+    no formats at all. Returns a map from carousel position to file."""
+    ydl_opts = build_ydl_opts(download_dir)
+    ydl_opts["format"] = (
+        "bestvideo[vcodec^=avc1][ext=mp4]+bestaudio[ext=m4a]/"
+        "best[vcodec^=avc1][ext=mp4]/"
+        "bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best[ext=mp4]/best"
+    )
+    ydl_opts["merge_output_format"] = "mp4"
+    if len(entries) > 1:
+        ydl_opts["playlist_items"] = ",".join(str(index + 1) for index in video_indices)
+
+    with YoutubeDL(ydl_opts) as ydl:
+        info = ydl.extract_info(url, download=True)
+
+    # The download pass returns the selected entries in the order we asked
+    # for them, so position N of the result is carousel item video_indices[N].
+    video_paths: dict[int, Path] = {}
+    for position, entry in enumerate(post_entries(info or {})):
+        if position >= len(video_indices):
             break
 
-    if not video_path.exists():
-        candidates = sorted(download_dir.glob("*"), key=lambda item: item.stat().st_size, reverse=True)
-        if not candidates:
-            raise FileNotFoundError("yt-dlp did not create a video file")
-        video_path = candidates[0]
+        video_path = downloaded_entry_path(entry)
+        if video_path:
+            video_paths[video_indices[position]] = video_path
 
-    video_path = ensure_h264_video(video_path, download_dir)
+    if not video_paths and len(video_indices) == 1:
+        # yt-dlp didn't report a filepath: fall back to the largest video
+        # file it left behind (the cookie copy shares this directory, hence
+        # the extension filter).
+        candidates = sorted(
+            (
+                item
+                for item in download_dir.iterdir()
+                if item.is_file() and item.suffix.lower() in VIDEO_FILE_EXTENSIONS
+            ),
+            key=lambda item: item.stat().st_size,
+            reverse=True,
+        )
+        if candidates:
+            video_paths[video_indices[0]] = candidates[0]
 
-    caption = build_reel_caption(info, url)
-    return video_path, add_audio_warning_if_needed(caption, video_path)
+    return video_paths
+
+
+def best_photo_url(entry: dict[str, Any]) -> Optional[str]:
+    thumbnails = [thumbnail for thumbnail in entry.get("thumbnails") or [] if thumbnail.get("url")]
+    if thumbnails:
+        best_thumbnail = max(
+            thumbnails,
+            key=lambda thumbnail: (thumbnail.get("width") or 0) * (thumbnail.get("height") or 0),
+        )
+        return str(best_thumbnail["url"])
+
+    thumbnail_url = entry.get("thumbnail")
+    return str(thumbnail_url) if thumbnail_url else None
+
+
+def download_photo(entry: dict[str, Any], index: int, download_dir: Path) -> Optional[Path]:
+    """Fetch a carousel photo straight from its CDN URL, since yt-dlp has no
+    downloader for an entry it never built formats for."""
+    photo_url = best_photo_url(entry)
+    if not photo_url:
+        return None
+
+    parsed_url = urlparse(photo_url)
+    if parsed_url.scheme not in {"http", "https"}:
+        logger.warning("Skipping photo %s with unsupported URL scheme %r", index, parsed_url.scheme)
+        return None
+
+    suffix = Path(parsed_url.path).suffix.lower()
+    if suffix not in DOWNLOADABLE_PHOTO_EXTENSIONS:
+        suffix = ".jpg"
+    photo_path = download_dir / f"photo-{index:02d}{suffix}"
+
+    headers = dict(INSTAGRAM_IMAGE_HEADERS)
+    headers.update(entry.get("http_headers") or {})
+
+    try:
+        request = urllib.request.Request(photo_url, headers=headers)
+        with urllib.request.urlopen(request, timeout=PHOTO_DOWNLOAD_TIMEOUT_SECONDS) as response:
+            with photo_path.open("wb") as photo_file:
+                shutil.copyfileobj(response, photo_file)
+    except (OSError, ValueError):
+        logger.exception("Failed to download photo %s of the post", index)
+        return None
+
+    if not photo_path.exists() or photo_path.stat().st_size == 0:
+        return None
+
+    return photo_path
+
+
+def prepare_photo_for_upload(photo_path: Path, work_dir: Path) -> Path:
+    """Telegram only takes JPEG/PNG under its photo size limit, while
+    Instagram sometimes serves WebP and, for newer posts, large originals -
+    so re-encode anything that wouldn't be accepted as a photo."""
+    too_large = photo_path.stat().st_size > PHOTO_MAX_FILE_SIZE_BYTES
+    if photo_path.suffix.lower() in TELEGRAM_PHOTO_EXTENSIONS and not too_large:
+        return photo_path
+
+    output_path = work_dir / f"{photo_path.stem}.telegram.jpg"
+    command = [
+        "ffmpeg",
+        "-y",
+        "-i",
+        str(photo_path),
+        "-vf",
+        f"scale='min({PHOTO_MAX_DIMENSION},iw)':-1",
+        "-q:v",
+        "3",
+        str(output_path),
+    ]
+
+    try:
+        subprocess.run(command, check=True, capture_output=True, timeout=120)
+    except (FileNotFoundError, subprocess.SubprocessError):
+        logger.exception("Failed to re-encode %s for Telegram", photo_path)
+        return photo_path
+
+    return output_path if output_path.exists() else photo_path
+
+
+def download_post(url: str, download_dir: Path) -> Tuple[list[MediaItem], str]:
+    """Download every piece of media in an Instagram post - a Reel, a single
+    video or photo, or a carousel mixing both - in the order the post shows
+    them."""
+    # Canonicalize to instagram.com: yt-dlp's Instagram extractor only
+    # recognizes that domain, not aliases like instagr.am.
+    url = normalize_post_url(url)
+
+    try:
+        info = probe_post(url, download_dir)
+    except ExtractorError as error:
+        if "no video formats" in str(error).lower():
+            raise NoMediaInPostError("This Instagram post has no downloadable media.") from error
+        raise
+
+    entries = post_entries(info)
+    if not entries:
+        raise NoMediaInPostError("This Instagram post has no downloadable media.")
+
+    video_indices = [index for index, entry in enumerate(entries) if entry_has_video(entry)]
+    video_paths = download_post_videos(url, download_dir, entries, video_indices) if video_indices else {}
+
+    items: list[MediaItem] = []
+    for index, entry in enumerate(entries):
+        if index in video_paths:
+            items.append(MediaItem(ensure_h264_video(video_paths[index], download_dir), "video"))
+            continue
+
+        if index in video_indices:
+            logger.warning("yt-dlp downloaded no file for video %s of %s", index + 1, url)
+            continue
+
+        photo_path = download_photo(entry, index, download_dir)
+        if photo_path is None:
+            continue
+
+        items.append(MediaItem(prepare_photo_for_upload(photo_path, download_dir), "photo"))
+
+    if not items:
+        raise NoMediaInPostError("Failed to download any media from this post.")
+
+    caption = build_post_caption(info, url)
+    if len(items) == 1 and items[0].is_video:
+        # Only meaningful for a lone video: in a carousel a silent clip next
+        # to photos is normal, not a symptom of a stripped audio track.
+        caption = add_audio_warning_if_needed(caption, items[0].path)
+
+    return items, caption
+
+
+def prepare_items_for_upload(items: list[MediaItem], work_dir: Path) -> Tuple[list[MediaItem], bool]:
+    prepared_items: list[MediaItem] = []
+    compressed_any = False
+
+    for item in items:
+        if not item.is_video:
+            prepared_items.append(item)
+            continue
+
+        video_path, compressed = prepare_video_for_upload(item.path, work_dir)
+        compressed_any = compressed_any or compressed
+        prepared_items.append(MediaItem(video_path, item.kind))
+
+    return prepared_items, compressed_any
+
+
+class MediaTooLargeError(RuntimeError):
+    """Raised when a downloaded file still exceeds Telegram's limit after
+    compression, so the user is told about the size rather than getting the
+    generic download-failed message."""
+
+
+def ensure_items_fit_telegram(items: list[MediaItem]) -> None:
+    for item in items:
+        limit = MAX_FILE_SIZE_BYTES if item.is_video else PHOTO_MAX_FILE_SIZE_BYTES
+        if item.path.stat().st_size > limit:
+            raise MediaTooLargeError(
+                f"{item.kind} file is larger than {limit // (1024 * 1024)} MB"
+            )
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
-        "Пришли ссылку на Instagram Reel, а я отправлю видео файлом."
+        "Пришли ссылку на Instagram — Reel, пост с фото или карусель, "
+        "а я отправлю всё содержимое сюда."
     )
 
 
@@ -696,114 +1048,241 @@ async def chatid(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await message.reply_text(f"Chat ID: <code>{message.chat_id}</code>", parse_mode=ParseMode.HTML)
 
 
-async def upload_video_to_storage(context: ContextTypes.DEFAULT_TYPE, video_path: Path, caption: str) -> dict[str, str]:
-    storage_chat_id = parse_storage_chat_id()
+def file_reference_from_message(message) -> dict[str, str]:
+    if message.video is not None:
+        return {"type": "video", "file_id": message.video.file_id}
 
+    if message.photo:
+        return {"type": "photo", "file_id": message.photo[-1].file_id}
+
+    if message.document is not None:
+        return {"type": "document", "file_id": message.document.file_id}
+
+    raise RuntimeError("Telegram did not return a file_id for the uploaded media")
+
+
+async def upload_item_to_storage(
+    context: ContextTypes.DEFAULT_TYPE,
+    storage_chat_id: int | str,
+    item: MediaItem,
+    caption: Optional[str],
+) -> dict[str, str]:
     try:
-        with video_path.open("rb") as video_file:
-            sent_message = await context.bot.send_video(
-                chat_id=storage_chat_id,
-                video=video_file,
-                caption=caption,
-                parse_mode=ParseMode.HTML,
-                supports_streaming=True,
-                **video_send_hints(video_path),
-                read_timeout=UPLOAD_TIMEOUT_SECONDS,
-                write_timeout=UPLOAD_TIMEOUT_SECONDS,
-                connect_timeout=30,
-                pool_timeout=30,
-            )
-        if sent_message.video is None:
-            raise RuntimeError("Telegram did not return a video file_id")
+        with item.path.open("rb") as media_file:
+            if item.is_video:
+                sent_message = await context.bot.send_video(
+                    chat_id=storage_chat_id,
+                    video=media_file,
+                    caption=caption,
+                    parse_mode=ParseMode.HTML,
+                    supports_streaming=True,
+                    **video_send_hints(item.path),
+                    **UPLOAD_TIMEOUTS,
+                )
+            else:
+                sent_message = await context.bot.send_photo(
+                    chat_id=storage_chat_id,
+                    photo=media_file,
+                    caption=caption,
+                    parse_mode=ParseMode.HTML,
+                    **UPLOAD_TIMEOUTS,
+                )
 
-        return {
-            "type": "video",
-            "file_id": sent_message.video.file_id,
-            "caption": caption,
-            "title": title_from_caption(caption),
-        }
+        return file_reference_from_message(sent_message)
     except BadRequest:
-        logger.exception("Telegram refused storage video upload, sending as document")
-        with video_path.open("rb") as video_file:
+        logger.exception("Telegram refused the storage %s upload, sending as document", item.kind)
+        with item.path.open("rb") as media_file:
             sent_message = await context.bot.send_document(
                 chat_id=storage_chat_id,
-                document=video_file,
+                document=media_file,
                 caption=caption,
                 parse_mode=ParseMode.HTML,
-                read_timeout=UPLOAD_TIMEOUT_SECONDS,
-                write_timeout=UPLOAD_TIMEOUT_SECONDS,
-                connect_timeout=30,
-                pool_timeout=30,
+                **UPLOAD_TIMEOUTS,
             )
-        if sent_message.document is None:
-            raise RuntimeError("Telegram did not return a document file_id")
 
-        return {
-            "type": "document",
-            "file_id": sent_message.document.file_id,
-            "caption": caption,
-            "title": title_from_caption(caption),
-        }
+        return file_reference_from_message(sent_message)
 
 
-async def prepare_inline_video(url: str, context: ContextTypes.DEFAULT_TYPE) -> dict[str, str]:
+async def upload_items_to_storage(
+    context: ContextTypes.DEFAULT_TYPE,
+    items: list[MediaItem],
+    caption: str,
+) -> list[dict[str, str]]:
+    """Park every file of the post in the storage chat and keep the file_ids,
+    so later requests for the same post - inline or direct - can be answered
+    without downloading or uploading the bytes again."""
+    storage_chat_id = parse_storage_chat_id()
+    if len(items) == 1:
+        return [await upload_item_to_storage(context, storage_chat_id, items[0], caption)]
+
+    uploaded: list[dict[str, str]] = []
+    for chunk_index, chunk in enumerate(chunked(items, MEDIA_GROUP_LIMIT)):
+        sent_messages = None
+        with ExitStack() as stack:
+            media_group = [
+                build_input_media(
+                    item.kind,
+                    stack.enter_context(item.path.open("rb")),
+                    caption if chunk_index == 0 and position == 0 else None,
+                )
+                for position, item in enumerate(chunk)
+            ]
+            try:
+                sent_messages = await context.bot.send_media_group(
+                    chat_id=storage_chat_id,
+                    media=media_group,
+                    **UPLOAD_TIMEOUTS,
+                )
+            except BadRequest:
+                logger.exception("Telegram refused the storage album, uploading its items one by one")
+
+        if sent_messages is None:
+            for item in chunk:
+                uploaded.append(
+                    await upload_item_to_storage(
+                        context,
+                        storage_chat_id,
+                        item,
+                        caption if not uploaded else None,
+                    )
+                )
+        else:
+            uploaded.extend(file_reference_from_message(sent_message) for sent_message in sent_messages)
+
+    return uploaded
+
+
+async def prepare_inline_post(url: str, context: ContextTypes.DEFAULT_TYPE) -> dict[str, Any]:
     cached_result = get_cached_inline_result(url)
     if cached_result:
         return cached_result
 
     temp_dir = Path(tempfile.mkdtemp(prefix="ig_inline_"))
     try:
-        video_path, caption = await asyncio.to_thread(download_video, url, temp_dir)
-        video_path, compressed = await asyncio.to_thread(prepare_video_for_upload, video_path, temp_dir)
+        items, caption = await asyncio.to_thread(download_post, url, temp_dir)
+        items, compressed = await asyncio.to_thread(prepare_items_for_upload, items, temp_dir)
         caption = add_compression_note_if_needed(caption, compressed)
-        file_size = video_path.stat().st_size
-        if file_size > MAX_FILE_SIZE_BYTES:
-            raise RuntimeError(f"Video file is larger than {MAX_FILE_SIZE_MB} MB")
+        ensure_items_fit_telegram(items)
 
-        cached_result = await upload_video_to_storage(context, video_path, caption)
+        cached_result = {
+            "caption": caption,
+            "title": title_from_caption(caption),
+            "items": await upload_items_to_storage(context, items, caption),
+        }
         save_cached_inline_result(url, cached_result)
         return cached_result
     finally:
         shutil.rmtree(temp_dir, ignore_errors=True)
 
 
-async def send_prepared_result(message, cached_result: dict[str, str]) -> None:
-    """Send an already-uploaded (storage-chat) video/document by file_id,
-    without re-downloading or re-uploading the bytes."""
+async def send_prepared_result(message, cached_result: dict[str, Any]) -> None:
+    """Send an already-uploaded (storage-chat) post by file_id, without
+    re-downloading or re-uploading the bytes. A carousel goes out as one or
+    more albums, in the order the post shows it."""
+    items = cached_result.get("items") or []
+    if not items:
+        raise RuntimeError("Prepared result has no media")
+
     caption = cached_result.get("caption", "")
-    file_id = cached_result["file_id"]
-    if cached_result.get("type") == "document":
-        await message.reply_document(
-            document=file_id,
-            caption=caption,
-            parse_mode=ParseMode.HTML,
-            read_timeout=UPLOAD_TIMEOUT_SECONDS,
-            write_timeout=UPLOAD_TIMEOUT_SECONDS,
-            connect_timeout=30,
-            pool_timeout=30,
+    if len(items) == 1:
+        item = items[0]
+        if item.get("type") == "document":
+            await message.reply_document(
+                document=item["file_id"],
+                caption=caption,
+                parse_mode=ParseMode.HTML,
+                **UPLOAD_TIMEOUTS,
+            )
+        elif item.get("type") == "photo":
+            await message.reply_photo(
+                photo=item["file_id"],
+                caption=caption,
+                parse_mode=ParseMode.HTML,
+                **UPLOAD_TIMEOUTS,
+            )
+        else:
+            await message.reply_video(
+                video=item["file_id"],
+                caption=caption,
+                parse_mode=ParseMode.HTML,
+                supports_streaming=True,
+                **UPLOAD_TIMEOUTS,
+            )
+        return
+
+    for chunk_index, chunk in enumerate(chunked(items, MEDIA_GROUP_LIMIT)):
+        await message.reply_media_group(
+            media=[
+                build_input_media(
+                    item.get("type", "video"),
+                    item["file_id"],
+                    caption if chunk_index == 0 and position == 0 else None,
+                )
+                for position, item in enumerate(chunk)
+            ],
+            **UPLOAD_TIMEOUTS,
         )
-    else:
-        await message.reply_video(
-            video=file_id,
-            caption=caption,
-            parse_mode=ParseMode.HTML,
-            supports_streaming=True,
-            read_timeout=UPLOAD_TIMEOUT_SECONDS,
-            write_timeout=UPLOAD_TIMEOUT_SECONDS,
-            connect_timeout=30,
-            pool_timeout=30,
-        )
+
+
+async def send_local_media_items(message, items: list[MediaItem], caption: str) -> None:
+    """Send freshly downloaded files straight from disk - the path taken when
+    no storage chat is configured, so there are no file_ids to reuse."""
+    if len(items) == 1:
+        item = items[0]
+        try:
+            with item.path.open("rb") as media_file:
+                if item.is_video:
+                    await message.reply_video(
+                        video=media_file,
+                        filename=item.path.name,
+                        caption=caption,
+                        parse_mode=ParseMode.HTML,
+                        supports_streaming=True,
+                        **video_send_hints(item.path),
+                        **UPLOAD_TIMEOUTS,
+                    )
+                else:
+                    await message.reply_photo(
+                        photo=media_file,
+                        filename=item.path.name,
+                        caption=caption,
+                        parse_mode=ParseMode.HTML,
+                        **UPLOAD_TIMEOUTS,
+                    )
+        except BadRequest:
+            logger.exception("Telegram refused the %s format, sending as document", item.kind)
+            with item.path.open("rb") as media_file:
+                await message.reply_document(
+                    document=media_file,
+                    filename=item.path.name,
+                    caption=caption,
+                    parse_mode=ParseMode.HTML,
+                    **UPLOAD_TIMEOUTS,
+                )
+        return
+
+    for chunk_index, chunk in enumerate(chunked(items, MEDIA_GROUP_LIMIT)):
+        with ExitStack() as stack:
+            media_group = [
+                build_input_media(
+                    item.kind,
+                    stack.enter_context(item.path.open("rb")),
+                    caption if chunk_index == 0 and position == 0 else None,
+                )
+                for position, item in enumerate(chunk)
+            ]
+            await message.reply_media_group(media=media_group, **UPLOAD_TIMEOUTS)
 
 
 def get_or_create_prepare_task(url: str, context: ContextTypes.DEFAULT_TYPE) -> asyncio.Task:
-    """Reuse an in-flight prepare_inline_video() task for the same Reel so
+    """Reuse an in-flight prepare_inline_post() task for the same post so
     concurrent requests - inline queries and direct messages alike - don't
     trigger duplicate downloads and uploads for the same URL."""
-    cache_key = normalize_reel_url(url)
+    cache_key = normalize_post_url(url)
     inline_tasks = context.application.bot_data.setdefault("inline_tasks", {})
     task = inline_tasks.get(cache_key)
     if task is None or task.done():
-        task = context.application.create_task(prepare_inline_video(url, context))
+        task = context.application.create_task(prepare_inline_post(url, context))
         inline_tasks[cache_key] = task
 
         def forget_task(done_task: asyncio.Task, key: str = cache_key) -> None:
@@ -826,9 +1305,9 @@ async def handle_inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE
             [
                 build_inline_article(
                     "help",
-                    "Пришли ссылку на Instagram Reel",
+                    "Пришли ссылку на Instagram",
                     "Напиши: @bot_username https://www.instagram.com/reel/...",
-                    "Пришли ссылку на Instagram Reel после имени бота.",
+                    "Пришли ссылку на Reel или пост после имени бота.",
                 )
             ],
             cache_time=0,
@@ -838,7 +1317,7 @@ async def handle_inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     cached_result = get_cached_inline_result(url)
     if cached_result:
-        await inline_query.answer([build_inline_result(url, cached_result)], cache_time=0, is_personal=True)
+        await inline_query.answer(build_inline_results(url, cached_result), cache_time=0, is_personal=True)
         return
 
     if not STORAGE_CHAT_ID:
@@ -847,7 +1326,7 @@ async def handle_inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE
                 build_inline_article(
                     "setup-required",
                     "Нужно настроить STORAGE_CHAT_ID",
-                    "Inline mode требует storage-чат для кэша видео",
+                    "Inline mode требует storage-чат для кэша файлов",
                     "Inline mode еще не настроен: добавь STORAGE_CHAT_ID в .env и перезапусти бота.",
                 )
             ],
@@ -867,15 +1346,15 @@ async def handle_inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE
     if task.done():
         try:
             cached_result = task.result()
-        except NoVideoInPostError:
-            logger.info("No video track in post %s", url)
+        except NoMediaInPostError:
+            logger.info("No downloadable media in post %s", url)
             await inline_query.answer(
                 [
                     build_inline_article(
                         inline_result_id(url),
-                        "В посте нет видео",
-                        "Это фото или карусель без видео",
-                        "В этой публикации нет видео — это фото или карусель без видео. Пришли ссылку на Reel или пост с видео.",
+                        "В посте нет медиа",
+                        "Не нашлось ни видео, ни фото",
+                        "В этой публикации нет ни видео, ни фото, которые я могу скачать.",
                     )
                 ],
                 cache_time=0,
@@ -888,9 +1367,9 @@ async def handle_inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE
                 [
                     build_inline_article(
                         inline_result_id(url),
-                        "Не получилось подготовить видео",
+                        "Не получилось подготовить публикацию",
                         "Попробуй еще раз или отправь ссылку боту в личку",
-                        "Не получилось подготовить видео для inline-отправки.",
+                        "Не получилось подготовить файлы для inline-отправки.",
                     )
                 ],
                 cache_time=0,
@@ -898,7 +1377,7 @@ async def handle_inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE
             )
             return
 
-        await inline_query.answer([build_inline_result(url, cached_result)], cache_time=0, is_personal=True)
+        await inline_query.answer(build_inline_results(url, cached_result), cache_time=0, is_personal=True)
         return
 
     placeholder_photo_file_id = await get_placeholder_photo_file_id(context)
@@ -950,19 +1429,24 @@ async def handle_chosen_inline_result(update: Update, context: ContextTypes.DEFA
             try:
                 await context.bot.edit_message_caption(
                     inline_message_id=chosen.inline_message_id,
-                    caption="Не получилось подготовить видео. Попробуй еще раз.",
+                    caption="Не получилось подготовить публикацию. Попробуй еще раз.",
                     reply_markup=None,
                 )
             except TelegramError:
                 pass
             return
 
-    caption = cached_result.get("caption", "")
-    media = (
-        InputMediaDocument(media=cached_result["file_id"], caption=caption, parse_mode=ParseMode.HTML)
-        if cached_result.get("type") == "document"
-        else InputMediaVideo(media=cached_result["file_id"], caption=caption, parse_mode=ParseMode.HTML)
-    )
+    items = cached_result.get("items") or []
+    if not items:
+        return
+
+    # The placeholder carries the bare per-URL id, so a carousel resolves to
+    # its first file here; the other files stay available by repeating the
+    # inline query, which then answers with one result per item.
+    index = min(inline_item_index(chosen.result_id, url), len(items) - 1)
+    item = items[index]
+    caption = add_carousel_note_if_needed(cached_result.get("caption", ""), index, len(items))
+    media = build_input_media(item.get("type", "video"), item["file_id"], caption)
     try:
         await context.bot.edit_message_media(
             inline_message_id=chosen.inline_message_id,
@@ -970,7 +1454,7 @@ async def handle_chosen_inline_result(update: Update, context: ContextTypes.DEFA
             reply_markup=None,
         )
     except TelegramError:
-        logger.exception("Failed to swap placeholder for the prepared video (inline_message_id=%s)", chosen.inline_message_id)
+        logger.exception("Failed to swap placeholder for the prepared media (inline_message_id=%s)", chosen.inline_message_id)
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -984,23 +1468,24 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     url = find_instagram_url(message.text)
     if not url:
         await message.reply_text(
-            "Не вижу ссылку на Instagram Reel. Пришли ссылку на ролик в формате: instagram.com / reel / CODE",
+            "Не вижу ссылку на Instagram. Пришли ссылку на Reel или пост в формате: "
+            "instagram.com / reel / CODE или instagram.com / p / CODE",
             disable_web_page_preview=True,
         )
         return
 
-    status_message = await message.reply_text("Скачиваю видео...")
+    status_message = await message.reply_text("Скачиваю публикацию...")
     await context.bot.send_chat_action(chat_id=message.chat_id, action=ChatAction.UPLOAD_VIDEO)
 
-    # Fast path: this Reel was already downloaded and uploaded to the
+    # Fast path: this post was already downloaded and uploaded to the
     # storage chat before (via inline mode or an earlier message), so we
-    # can just resend the existing file_id instead of downloading again.
+    # can just resend the existing file_ids instead of downloading again.
     cached_result = get_cached_inline_result(url)
     if cached_result:
         try:
             await send_prepared_result(message, cached_result)
         except TelegramError:
-            logger.exception("Failed to resend cached video for %s, falling back to a fresh download", url)
+            logger.exception("Failed to resend cached media for %s, falling back to a fresh download", url)
         else:
             await status_message.delete()
             return
@@ -1013,25 +1498,31 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         task = get_or_create_prepare_task(url, context)
         try:
             cached_result = await task
-        except RuntimeError:
-            logger.exception("Video too large for %s", url)
+        except NoMediaInPostError:
+            logger.info("No downloadable media in post %s", url)
             await status_message.edit_text(
-                f"Видео скачалось, но файл больше {MAX_FILE_SIZE_MB} МБ. Telegram может не принять такой файл."
+                "В этой публикации нет ни видео, ни фото, которые я могу скачать."
+            )
+            return
+        except MediaTooLargeError:
+            logger.exception("Media too large for %s", url)
+            await status_message.edit_text(
+                f"Публикация скачалась, но файл больше {MAX_FILE_SIZE_MB} МБ. Telegram может не принять такой файл."
             )
             return
         except Exception:
             logger.exception("Failed to prepare %s", url)
             await status_message.edit_text(
-                "Не получилось скачать видео. Если Reel приватный или Instagram просит вход, добавь cookies-файл в настройках."
+                "Не получилось скачать публикацию. Если она приватная или Instagram просит вход, добавь cookies-файл в настройках."
             )
             return
 
         try:
             await send_prepared_result(message, cached_result)
         except TelegramError:
-            logger.exception("Failed to deliver prepared video for %s", url)
+            logger.exception("Failed to deliver prepared media for %s", url)
             await status_message.edit_text(
-                "Видео подготовлено, но Telegram не смог его отправить в этот чат. Попробуй отправить ссылку еще раз."
+                "Файлы подготовлены, но Telegram не смог их отправить в этот чат. Попробуй отправить ссылку еще раз."
             )
             return
 
@@ -1040,82 +1531,59 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     # Legacy path for setups without STORAGE_CHAT_ID: download and send
     # straight to this chat, without the shared cache/dedup above.
-    temp_dir = Path(tempfile.mkdtemp(prefix="ig_reel_"))
+    temp_dir = Path(tempfile.mkdtemp(prefix="ig_post_"))
     try:
         try:
-            video_path, caption = await asyncio.to_thread(download_video, url, temp_dir)
-        except NoVideoInPostError:
-            logger.info("No video track in post %s", url)
+            items, caption = await asyncio.to_thread(download_post, url, temp_dir)
+        except NoMediaInPostError:
+            logger.info("No downloadable media in post %s", url)
             await status_message.edit_text(
-                "В этой публикации нет видео — это фото или карусель без видео. Пришли ссылку на Reel или пост с видео."
+                "В этой публикации нет ни видео, ни фото, которые я могу скачать."
             )
             return
         except Exception:
             logger.exception("Failed to download %s", url)
             await status_message.edit_text(
-                "Не получилось скачать видео. Если Reel приватный или Instagram просит вход, добавь cookies-файл в настройках."
+                "Не получилось скачать публикацию. Если она приватная или Instagram просит вход, добавь cookies-файл в настройках."
             )
             return
 
-        file_size = video_path.stat().st_size
+        oversized_video = any(
+            item.is_video and item.path.stat().st_size > MAX_FILE_SIZE_BYTES for item in items
+        )
+        if oversized_video and ENABLE_VIDEO_COMPRESSION:
+            await status_message.edit_text("Видео большое, сжимаю перед отправкой...")
 
-        if file_size > MAX_FILE_SIZE_BYTES:
-            if ENABLE_VIDEO_COMPRESSION:
-                await status_message.edit_text("Видео большое, сжимаю перед отправкой...")
-                video_path, compressed = await asyncio.to_thread(prepare_video_for_upload, video_path, temp_dir)
-                caption = add_compression_note_if_needed(caption, compressed)
-                file_size = video_path.stat().st_size
+        items, compressed = await asyncio.to_thread(prepare_items_for_upload, items, temp_dir)
+        caption = add_compression_note_if_needed(caption, compressed)
 
-        if file_size > MAX_FILE_SIZE_BYTES:
+        try:
+            ensure_items_fit_telegram(items)
+        except MediaTooLargeError:
             await status_message.edit_text(
-                f"Видео скачалось, но файл больше {MAX_FILE_SIZE_MB} МБ. Telegram может не принять такой файл."
+                f"Публикация скачалась, но файл больше {MAX_FILE_SIZE_MB} МБ. Telegram может не принять такой файл."
             )
             return
 
         try:
-            with video_path.open("rb") as video_file:
-                await message.reply_video(
-                    video=video_file,
-                    filename=video_path.name,
-                    caption=caption,
-                    parse_mode=ParseMode.HTML,
-                    supports_streaming=True,
-                    **video_send_hints(video_path),
-                    read_timeout=UPLOAD_TIMEOUT_SECONDS,
-                    write_timeout=UPLOAD_TIMEOUT_SECONDS,
-                    connect_timeout=30,
-                    pool_timeout=30,
-                )
-        except BadRequest:
-            logger.exception("Telegram refused video format, sending as document")
-            with video_path.open("rb") as video_file:
-                await message.reply_document(
-                    document=video_file,
-                    filename=video_path.name,
-                    caption=caption,
-                    parse_mode=ParseMode.HTML,
-                    read_timeout=UPLOAD_TIMEOUT_SECONDS,
-                    write_timeout=UPLOAD_TIMEOUT_SECONDS,
-                    connect_timeout=30,
-                    pool_timeout=30,
-                )
+            await send_local_media_items(message, items, caption)
         except TimedOut:
-            logger.exception("Telegram timed out while uploading video")
+            logger.exception("Telegram timed out while uploading the post")
             await status_message.edit_text(
-                "Видео скачано, но Telegram слишком долго отвечал при отправке. Проверь чат: иногда файл приходит позже. "
-                "Если не пришел, попробуй еще раз или увеличь UPLOAD_TIMEOUT_SECONDS."
+                "Файлы скачаны, но Telegram слишком долго отвечал при отправке. Проверь чат: иногда они приходят позже. "
+                "Если не пришли, попробуй еще раз или увеличь UPLOAD_TIMEOUT_SECONDS."
             )
             return
         except NetworkError:
-            logger.exception("Network error while uploading video")
+            logger.exception("Network error while uploading the post")
             await status_message.edit_text(
-                "Видео скачано, но при отправке в Telegram был сетевой сбой. Попробуй отправить ссылку еще раз."
+                "Файлы скачаны, но при отправке в Telegram был сетевой сбой. Попробуй отправить ссылку еще раз."
             )
             return
         except TelegramError:
-            logger.exception("Telegram failed to upload video")
+            logger.exception("Telegram failed to upload the post")
             await status_message.edit_text(
-                "Видео скачано, но Telegram не смог его отправить. Попробуй другой Reel или отправь ссылку еще раз."
+                "Файлы скачаны, но Telegram не смог их отправить. Попробуй другую публикацию или отправь ссылку еще раз."
             )
             return
         await status_message.delete()
