@@ -402,18 +402,13 @@ def cached_post(items):
     }
 
 
-def test_inline_item_result_id_round_trips():
+def test_inline_item_result_id_keeps_the_bare_id_only_for_a_single_file():
     base_id = bot.inline_result_id(POST_URL)
     assert bot.inline_item_result_id(POST_URL, 0, 1) == base_id
+    # The first file of a carousel must not share the placeholder's bare id:
+    # that difference is how the chosen-result handler tells them apart.
+    assert bot.inline_item_result_id(POST_URL, 0, 5) == f"{base_id}-0"
     assert bot.inline_item_result_id(POST_URL, 2, 5) == f"{base_id}-2"
-    assert bot.inline_item_index(base_id, POST_URL) == 0
-    assert bot.inline_item_index(f"{base_id}-2", POST_URL) == 2
-
-
-def test_inline_item_index_falls_back_on_an_unexpected_id():
-    base_id = bot.inline_result_id(POST_URL)
-    assert bot.inline_item_index(f"{base_id}-nonsense", POST_URL) == 0
-    assert bot.inline_item_index("something-else", POST_URL) == 0
 
 
 def test_inline_result_id_fits_telegram_limit():

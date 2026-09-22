@@ -228,20 +228,64 @@ def add_carousel_note_if_needed(caption: str, index: int, total: int) -> str:
 def inline_item_result_id(url: str, index: int, total: int) -> str:
     """A single-file post keeps the bare per-URL id - the same one the
     placeholder uses - while a carousel appends the item's position, so every
-    result in one answer stays distinct and handle_chosen_inline_result can
-    tell which file the user picked."""
+    result in one answer stays distinct. The bare id is also how
+    handle_chosen_inline_result tells the placeholder, which still needs its
+    media swapped in, from a carousel result that is already final."""
     base_id = inline_result_id(url)
     return base_id if total == 1 else f"{base_id}-{index}"
 
 
-def inline_item_index(result_id: str, url: str) -> int:
-    base_id = inline_result_id(url)
-    if result_id.startswith(f"{base_id}-"):
-        suffix = result_id[len(base_id) + 1:]
-        if suffix.isdigit():
-            return int(suffix)
+# Telegram caps the parameter of a /start deep link at 64 characters.
+START_PAYLOAD_MAX_LENGTH = 64
+START_PAYLOAD_POST_TYPES = {"p", "reel", "reels", "tv"}
+INSTAGRAM_SHORTCODE_RE = re.compile(r"[A-Za-z0-9_-]+")
+CAROUSEL_BUTTON_TEXT = "Посмотреть карусель"
 
-    return 0
+
+def post_start_payload(url: str) -> Optional[str]:
+    """Name a post in a /start deep link as `<type>_<shortcode>`.
+
+    Telegram allows only A-Z, a-z, 0-9, `_` and `-` there - which is exactly
+    the shortcode alphabet, so the shortcode fits as is, and the post can be
+    downloaded again even after it has dropped out of the file_id cache. That
+    leaves no spare character for a separator, but none of the post types
+    contains an underscore, so splitting on the first one is unambiguous."""
+    parts = [part for part in urlparse(normalize_post_url(url)).path.split("/") if part]
+    if len(parts) != 2:
+        return None
+
+    post_type, shortcode = parts
+    if post_type not in START_PAYLOAD_POST_TYPES or not INSTAGRAM_SHORTCODE_RE.fullmatch(shortcode):
+        return None
+
+    payload = f"{post_type}_{shortcode}"
+    return payload if len(payload) <= START_PAYLOAD_MAX_LENGTH else None
+
+
+def post_url_from_start_payload(payload: str) -> Optional[str]:
+    """The reverse of post_start_payload. Anyone can craft a /start link, so
+    nothing that does not parse as a post is turned into a URL."""
+    post_type, _, shortcode = payload.partition("_")
+    if post_type not in START_PAYLOAD_POST_TYPES or not INSTAGRAM_SHORTCODE_RE.fullmatch(shortcode):
+        return None
+
+    return f"https://www.instagram.com/{post_type}/{shortcode}/"
+
+
+def carousel_keyboard(url: str, bot_username: str) -> Optional[InlineKeyboardMarkup]:
+    """The button under an inline carousel message.
+
+    An inline message carries a single medium, and Telegram never tells the
+    bot which chat it was sent to - so the rest of the album cannot follow it
+    there. The button opens a private chat with the bot instead, where the
+    /start deep link delivers the whole post as an album."""
+    payload = post_start_payload(url)
+    if not payload or not bot_username:
+        return None
+
+    return InlineKeyboardMarkup(
+        [[InlineKeyboardButton(CAROUSEL_BUTTON_TEXT, url=f"https://t.me/{bot_username}?start={payload}")]]
+    )
 
 
 def build_input_media(kind: str, media: Any, caption: Optional[str]) -> InputMediaPhoto | InputMediaDocument | InputMediaVideo:
@@ -259,14 +303,16 @@ def build_input_media(kind: str, media: Any, caption: Optional[str]) -> InputMed
     )
 
 
-def build_inline_results(url: str, cached_result: dict[str, Any]) -> list[InlineQueryResult]:
+def build_inline_results(url: str, cached_result: dict[str, Any], bot_username: str = "") -> list[InlineQueryResult]:
     """One inline result per file in the post. Telegram has no inline
     equivalent of an album, so a carousel is offered as a list the user picks
-    from rather than as a single result."""
+    from rather than as a single result - each one carrying a button to the
+    whole album in a private chat with the bot."""
     items = cached_result.get("items") or []
     base_caption = cached_result.get("caption") or escape(normalize_post_url(url))
     title = cached_result.get("title") or "Instagram"
     total = len(items)
+    reply_markup = carousel_keyboard(url, bot_username) if total > 1 else None
 
     results: list[InlineQueryResult] = []
     for index, item in enumerate(items):
@@ -284,6 +330,7 @@ def build_inline_results(url: str, cached_result: dict[str, Any]) -> list[Inline
                     title=item_title,
                     caption=caption,
                     parse_mode=ParseMode.HTML,
+                    reply_markup=reply_markup,
                 )
             )
         elif kind == "document":
@@ -294,6 +341,7 @@ def build_inline_results(url: str, cached_result: dict[str, Any]) -> list[Inline
                     title=item_title,
                     caption=caption,
                     parse_mode=ParseMode.HTML,
+                    reply_markup=reply_markup,
                 )
             )
         else:
@@ -304,6 +352,7 @@ def build_inline_results(url: str, cached_result: dict[str, Any]) -> list[Inline
                     title=item_title,
                     caption=caption,
                     parse_mode=ParseMode.HTML,
+                    reply_markup=reply_markup,
                 )
             )
 
@@ -1036,7 +1085,19 @@ def ensure_items_fit_telegram(items: list[MediaItem]) -> None:
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.message.reply_text(
+    message = update.message
+    if message is None:
+        return
+
+    # The button under an inline carousel opens t.me/<bot>?start=<payload>,
+    # which arrives here as /start <payload>.
+    if context.args:
+        url = post_url_from_start_payload(context.args[0])
+        if url:
+            await deliver_post(message, url, context)
+            return
+
+    await message.reply_text(
         "Пришли ссылку на Instagram — Reel, пост с фото или карусель, "
         "а я отправлю всё содержимое сюда."
     )
@@ -1319,7 +1380,7 @@ async def handle_inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     cached_result = get_cached_inline_result(url)
     if cached_result:
-        await inline_query.answer(build_inline_results(url, cached_result), cache_time=0, is_personal=True)
+        await inline_query.answer(build_inline_results(url, cached_result, await get_bot_username(context)), cache_time=0, is_personal=True)
         return
 
     if not STORAGE_CHAT_ID:
@@ -1379,7 +1440,7 @@ async def handle_inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE
             )
             return
 
-        await inline_query.answer(build_inline_results(url, cached_result), cache_time=0, is_personal=True)
+        await inline_query.answer(build_inline_results(url, cached_result, await get_bot_username(context)), cache_time=0, is_personal=True)
         return
 
     placeholder_photo_file_id = await get_placeholder_photo_file_id(context)
@@ -1406,7 +1467,7 @@ async def handle_inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 async def handle_chosen_inline_result(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Once a user picks the placeholder result built by
-    build_inline_placeholder_result(), swap it for the real video in place
+    build_inline_placeholder_result(), swap it for the real media in place
     as soon as it's ready, using the same deduplicated prepare task the
     inline query itself started. Requires inline feedback collection to be
     enabled for the bot via @BotFather (/setinlinefeedback)."""
@@ -1418,9 +1479,14 @@ async def handle_chosen_inline_result(update: Update, context: ContextTypes.DEFA
     if not url:
         return
 
-    # Already-cached results are answered as the final video directly by
-    # handle_inline_query and carry no reply_markup, so they never reach
-    # here with an inline_message_id - only unfinished placeholders do.
+    # Telegram reports an inline_message_id only for a result with a button.
+    # That is the placeholder, which still needs its media swapped in - and
+    # also, since they carry the carousel button, the per-file results of a
+    # cached carousel, which are final already. Swapping one of those would
+    # re-set the same file and strip the button the moment it was sent.
+    if chosen.result_id != inline_result_id(url):
+        return
+
     cached_result = get_cached_inline_result(url)
     if cached_result is None:
         task = get_or_create_prepare_task(url, context)
@@ -1442,18 +1508,17 @@ async def handle_chosen_inline_result(update: Update, context: ContextTypes.DEFA
     if not items:
         return
 
-    # The placeholder carries the bare per-URL id, so a carousel resolves to
-    # its first file here; the other files stay available by repeating the
-    # inline query, which then answers with one result per item.
-    index = min(inline_item_index(chosen.result_id, url), len(items) - 1)
-    item = items[index]
-    caption = add_carousel_note_if_needed(cached_result.get("caption", ""), index, len(items))
+    # A placeholder holds one medium, so a carousel resolves to its first
+    # file here, with the button to the whole album underneath.
+    item = items[0]
+    caption = add_carousel_note_if_needed(cached_result.get("caption", ""), 0, len(items))
     media = build_input_media(item.get("type", "video"), item["file_id"], caption)
+    reply_markup = carousel_keyboard(url, await get_bot_username(context)) if len(items) > 1 else None
     try:
         await context.bot.edit_message_media(
             inline_message_id=chosen.inline_message_id,
             media=media,
-            reply_markup=None,
+            reply_markup=reply_markup,
         )
     except TelegramError:
         logger.exception("Failed to swap placeholder for the prepared media (inline_message_id=%s)", chosen.inline_message_id)
@@ -1476,6 +1541,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         )
         return
 
+    await deliver_post(message, url, context)
+
+
+async def deliver_post(message, url: str, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Send the post behind `url` to the chat `message` came from - as an
+    album when it is a carousel - from the file_id cache when it is there and
+    downloading it otherwise. Shared by links sent to the bot and by the
+    /start deep link behind the inline carousel button."""
     status_message = await message.reply_text("Скачиваю публикацию...")
     await context.bot.send_chat_action(chat_id=message.chat_id, action=ChatAction.UPLOAD_VIDEO)
 
