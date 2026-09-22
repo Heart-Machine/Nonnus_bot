@@ -18,8 +18,12 @@ jobs:
     uses: ./.github/workflows/ci.yml
 
   build:
-    name: Build Docker Image
-    runs-on: ubuntu-latest
+    name: Build and push image
+    # Pinned rather than ubuntu-latest, which GitHub moves to a new Ubuntu
+    # release on its own schedule - the next move is to Ubuntu 26. Pinning
+    # means the runner changes when this line changes, not on an announcement,
+    # so a build that worked yesterday works today. Bump it deliberately.
+    runs-on: ubuntu-24.04
     needs: test
     outputs:
       image: ${{ steps.image.outputs.image }}
@@ -57,7 +61,7 @@ jobs:
 
   deploy:
     name: Deploy over SSH
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: build
     environment: production
     steps:
@@ -88,8 +92,14 @@ jobs:
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           port: ${{ secrets.SSH_PORT || 22 }}
           envs: IMAGE,BOT_TOKEN,STORAGE_CHAT_ID,MAX_FILE_SIZE_MB,PHOTO_MAX_FILE_SIZE_MB,PHOTO_MAX_DIMENSION,PHOTO_DOWNLOAD_TIMEOUT_SECONDS,UPLOAD_TIMEOUT_SECONDS,ENABLE_VIDEO_COMPRESSION,VIDEO_COMPRESSION_TARGET_MB,VIDEO_COMPRESSION_HEIGHTS,VIDEO_COMPRESSION_AUDIO_KBPS,VIDEO_COMPRESSION_PRESET,VIDEO_COMPRESSION_MIN_VIDEO_KBPS,DEPLOY_PATH,INSTAGRAM_COOKIES_B64,GHCR_USERNAME,GHCR_TOKEN
-          script_stop: true
           script: |
+            # appleboy/ssh-action dropped the script_stop input, and an input
+            # it does not know is ignored rather than rejected - so the script
+            # has to stop itself. Without this the action reports the exit code
+            # of the last command, docker image prune, and a failed pull would
+            # leave a green tick on a deploy that never happened.
+            set -e
+
             APP_DIR="${DEPLOY_PATH:-$HOME/instagram-reels-bot}"
             mkdir -p "$APP_DIR/data" "$APP_DIR/cookies"
             cd "$APP_DIR"

@@ -12,7 +12,11 @@ permissions:
 jobs:
   test:
     name: Lint and test
-    runs-on: ubuntu-latest
+    # Pinned rather than ubuntu-latest, which GitHub moves to a new Ubuntu
+    # release on its own schedule - the next move is to Ubuntu 26. Pinning
+    # means the runner changes when this line changes, not on an announcement,
+    # so a build that worked yesterday works today. Bump it deliberately.
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -51,8 +55,8 @@ jobs:
         run: pytest -q
 
   docker:
-    name: Build Docker image
-    runs-on: ubuntu-latest
+    name: Build image
+    runs-on: ubuntu-24.04
     # Only on pull requests: when this workflow is called by the deploy run,
     # that run builds and pushes the real image itself a moment later.
     if: github.event_name == 'pull_request'
