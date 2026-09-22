@@ -8,11 +8,13 @@ import re
 import shutil
 import subprocess
 import tempfile
+import threading
+import time
 import urllib.request
 from contextlib import ExitStack
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterator, Optional, Tuple
+from typing import Any, Callable, Iterator, Optional, Tuple, TypeVar
 from urllib.parse import urlparse
 
 from dotenv import load_dotenv
@@ -43,7 +45,7 @@ from telegram.ext import (
     filters,
 )
 from yt_dlp import YoutubeDL
-from yt_dlp.utils import ExtractorError
+from yt_dlp.utils import ExtractorError, YoutubeDLError
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -902,17 +904,90 @@ class MediaItem:
         return self.kind == "video"
 
 
-def build_ydl_opts(download_dir: Path) -> dict[str, Any]:
+# How long to go without the cookies once Instagram has turned them down,
+# before trying them again. The file only changes on a deploy, and a deploy
+# restarts the bot anyway, so this is for a session that recovers by itself -
+# rare, but cheap to allow for.
+COOKIE_RETRY_SECONDS = 60 * 60
+# How often, at most, to remind the owner that the cookies stopped working.
+COOKIE_ALERT_INTERVAL_SECONDS = 12 * 60 * 60
+COOKIE_ALERT_TEXT = (
+    "Instagram не принял cookies бота: публикацию удалось скачать только без входа.\n\n"
+    "Пока бот скачивает без cookies. Публичные посты работают, а то, что требует входа, - нет.\n\n"
+    "Выгрузи свежие cookies аккаунта бота, обнови INSTAGRAM_COOKIES_B64 в окружении production "
+    "и запусти деплой вручную.\n\n"
+    "Следующее напоминание - не раньше чем через 12 ч."
+)
+
+
+class InstagramSession:
+    """Whether the Instagram cookies the bot was deployed with still work.
+
+    The cookie file is written once per deploy and the bot never updates it,
+    so a session Instagram has closed stays closed until the next deploy. And
+    a closed session is worse than none: yt-dlp sees sessionid, takes the
+    logged-in route and fails, where the logged-out route would have served a
+    public post without trouble.
+
+    Detection is indirect on purpose. A post that fails with the cookies and
+    then comes through without them says the cookies were the problem; one
+    that fails both ways says the post was - private or deleted - and raises no
+    alarm. That also keeps this off yt-dlp's error wording, which is nothing to
+    build on: a dead session currently surfaces as a JSON parse error rather
+    than as anything about logging in."""
+
+    def __init__(
+        self,
+        cookies_file: str,
+        retry_after: float = COOKIE_RETRY_SECONDS,
+        alert_every: float = COOKIE_ALERT_INTERVAL_SECONDS,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        self.cookies_file = cookies_file
+        self.retry_after = retry_after
+        self.alert_every = alert_every
+        self._clock = clock
+        # Downloads run in worker threads, several at a time.
+        self._lock = threading.Lock()
+        self._suspended_until = float("-inf")
+        self._last_alert = float("-inf")
+        self._alert_pending = False
+
+    def use_cookies(self) -> bool:
+        with self._lock:
+            return bool(self.cookies_file) and self._clock() >= self._suspended_until
+
+    def mark_rejected(self) -> None:
+        now = self._clock()
+        with self._lock:
+            self._suspended_until = now + self.retry_after
+            if now - self._last_alert >= self.alert_every:
+                self._last_alert = now
+                self._alert_pending = True
+
+    def take_alert(self) -> bool:
+        with self._lock:
+            pending, self._alert_pending = self._alert_pending, False
+            return pending
+
+
+INSTAGRAM_SESSION = InstagramSession(COOKIES_FILE)
+
+
+def build_ydl_opts(download_dir: Path, use_cookies: bool = True) -> dict[str, Any]:
     ydl_opts: dict[str, Any] = {
         "outtmpl": str(download_dir / "%(id)s.%(ext)s"),
         "quiet": True,
         "no_warnings": True,
+        # quiet does not cover the progress bar, which otherwise lands in the
+        # container log as a run of carriage returns for every file.
+        "noprogress": True,
         # Instagram extracts a carousel as a playlist of children, and we
         # want every child, not just the first one.
         "noplaylist": False,
     }
 
-    if COOKIES_FILE:
+    if use_cookies and COOKIES_FILE:
         source_cookiefile = Path(COOKIES_FILE)
         cookiefile = download_dir / source_cookiefile.name
         shutil.copyfile(source_cookiefile, cookiefile)
@@ -921,7 +996,7 @@ def build_ydl_opts(download_dir: Path) -> dict[str, Any]:
     return ydl_opts
 
 
-def probe_post(url: str, download_dir: Path) -> dict[str, Any]:
+def probe_post(url: str, download_dir: Path, use_cookies: bool = True) -> dict[str, Any]:
     """Metadata-only pass over the post.
 
     yt-dlp builds no `formats` for Instagram photos - their URLs only ever
@@ -929,7 +1004,7 @@ def probe_post(url: str, download_dir: Path) -> dict[str, Any]:
     formats found" on any post that isn't pure video. ignore_no_formats_error
     lets those entries through, which is what makes photo posts and mixed
     carousels visible to us at all."""
-    ydl_opts = build_ydl_opts(download_dir)
+    ydl_opts = build_ydl_opts(download_dir, use_cookies)
     ydl_opts["ignore_no_formats_error"] = True
 
     with YoutubeDL(ydl_opts) as ydl:
@@ -939,6 +1014,47 @@ def probe_post(url: str, download_dir: Path) -> dict[str, Any]:
         raise NoMediaInPostError("Instagram returned nothing for this post")
 
     return info
+
+
+T = TypeVar("T")
+
+
+def with_cookie_fallback(url: str, attempt: Callable[[bool], T]) -> Tuple[T, bool]:
+    """Run attempt(use_cookies) with the session cookies while they are
+    trusted, and again without them when that fails. Returns the result and
+    whether the cookies were used.
+
+    Both yt-dlp passes over a post go through this, not only the first,
+    because Instagram does not answer a dead session the same way twice.
+    Sometimes yt-dlp spots the redirect to the login page and quietly drops
+    the cookies itself; sometimes it gets an empty page and fails on the JSON.
+    So the probe can come through on the cookies and the video pass right
+    after it still fail on them."""
+    if not INSTAGRAM_SESSION.use_cookies():
+        return attempt(False), False
+
+    try:
+        return attempt(True), True
+    except YoutubeDLError as cookie_error:
+        try:
+            result = attempt(False)
+        except YoutubeDLError:
+            # Failed both ways: the post is the problem - private, deleted -
+            # not the session. Report what the primary route said.
+            raise cookie_error from None
+
+    logger.warning(
+        "Instagram turned down the session cookies for %s but served it without them; "
+        "going without cookies for %d min. Refresh INSTAGRAM_COOKIES_B64.",
+        url,
+        COOKIE_RETRY_SECONDS // 60,
+    )
+    INSTAGRAM_SESSION.mark_rejected()
+    return result, False
+
+
+def probe_post_with_fallback(url: str, download_dir: Path) -> Tuple[dict[str, Any], bool]:
+    return with_cookie_fallback(url, lambda use_cookies: probe_post(url, download_dir, use_cookies))
 
 
 def post_entries(info: dict[str, Any]) -> list[dict[str, Any]]:
@@ -969,13 +1085,14 @@ def download_post_videos(
     download_dir: Path,
     entries: list[dict[str, Any]],
     video_indices: list[int],
+    use_cookies: bool = True,
 ) -> dict[int, Path]:
     """Download only the carousel positions that actually carry a video.
 
     playlist_items is 1-based and keeps the photo entries out of the run
     entirely, so the format selector never has to cope with an entry that has
     no formats at all. Returns a map from carousel position to file."""
-    ydl_opts = build_ydl_opts(download_dir)
+    ydl_opts = build_ydl_opts(download_dir, use_cookies)
     ydl_opts["format"] = (
         "bestvideo[vcodec^=avc1][ext=mp4]+bestaudio[ext=m4a]/"
         "best[vcodec^=avc1][ext=mp4]/"
@@ -1107,7 +1224,7 @@ def download_post(url: str, download_dir: Path) -> Tuple[list[MediaItem], str]:
     url = normalize_post_url(url)
 
     try:
-        info = probe_post(url, download_dir)
+        info, _ = probe_post_with_fallback(url, download_dir)
     except ExtractorError as error:
         if "no video formats" in str(error).lower():
             raise NoMediaInPostError("This Instagram post has no downloadable media.") from error
@@ -1118,7 +1235,15 @@ def download_post(url: str, download_dir: Path) -> Tuple[list[MediaItem], str]:
         raise NoMediaInPostError("This Instagram post has no downloadable media.")
 
     video_indices = [index for index, entry in enumerate(entries) if entry_has_video(entry)]
-    video_paths = download_post_videos(url, download_dir, entries, video_indices) if video_indices else {}
+    video_paths: dict[int, Path] = {}
+    if video_indices:
+        # If the probe had to fall back, the cookies are suspended by now and
+        # this goes without them straight away; otherwise it gets its own
+        # fallback, for the reason given in with_cookie_fallback.
+        video_paths, _ = with_cookie_fallback(
+            url,
+            lambda use_cookies: download_post_videos(url, download_dir, entries, video_indices, use_cookies),
+        )
 
     items: list[MediaItem] = []
     for index, entry in enumerate(entries):
@@ -1310,6 +1435,35 @@ async def upload_items_to_storage(
     return uploaded
 
 
+async def alert_if_cookies_rejected(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Tell the owner in the storage chat that the session cookies stopped
+    working. Downloads carry on without them meanwhile; this is so it gets
+    noticed before someone sends a post that needs a login, not after."""
+    if not INSTAGRAM_SESSION.take_alert() or not STORAGE_CHAT_ID:
+        return
+
+    try:
+        await context.bot.send_message(chat_id=parse_storage_chat_id(), text=COOKIE_ALERT_TEXT)
+    except TelegramError:
+        logger.exception("Failed to send the Instagram cookie alert to the storage chat")
+
+
+async def download_post_in_thread(
+    url: str,
+    download_dir: Path,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> Tuple[list[MediaItem], str]:
+    """download_post off the event loop. The download only notes that the
+    cookies were turned down - it runs in a worker thread and cannot talk to
+    Telegram - so the alert goes out from here, and in `finally`: the owner
+    should hear about the cookies even when the post then fails for some
+    other reason."""
+    try:
+        return await asyncio.to_thread(download_post, url, download_dir)
+    finally:
+        await alert_if_cookies_rejected(context)
+
+
 async def prepare_inline_post(url: str, context: ContextTypes.DEFAULT_TYPE) -> dict[str, Any]:
     cached_result = get_cached_inline_result(url)
     if cached_result:
@@ -1317,7 +1471,7 @@ async def prepare_inline_post(url: str, context: ContextTypes.DEFAULT_TYPE) -> d
 
     temp_dir = Path(tempfile.mkdtemp(prefix="ig_inline_"))
     try:
-        items, caption = await asyncio.to_thread(download_post, url, temp_dir)
+        items, caption = await download_post_in_thread(url, temp_dir, context)
         items, compressed = await asyncio.to_thread(prepare_items_for_upload, items, temp_dir)
         caption = add_compression_note_if_needed(caption, compressed)
         ensure_items_fit_telegram(items)
@@ -1683,7 +1837,8 @@ async def deliver_post(message, url: str, context: ContextTypes.DEFAULT_TYPE) ->
         except Exception:
             logger.exception("Failed to prepare %s", url)
             await status_message.edit_text(
-                "Не получилось скачать публикацию. Если она приватная или Instagram просит вход, добавь cookies-файл в настройках."
+                "Не получилось скачать публикацию. Возможно, она закрытая или удалена. "
+                "Если ссылка открывается в Instagram, попробуй ещё раз чуть позже."
             )
             return
 
@@ -1704,7 +1859,7 @@ async def deliver_post(message, url: str, context: ContextTypes.DEFAULT_TYPE) ->
     temp_dir = Path(tempfile.mkdtemp(prefix="ig_post_"))
     try:
         try:
-            items, caption = await asyncio.to_thread(download_post, url, temp_dir)
+            items, caption = await download_post_in_thread(url, temp_dir, context)
         except NoMediaInPostError:
             logger.info("No downloadable media in post %s", url)
             await status_message.edit_text(
@@ -1714,7 +1869,8 @@ async def deliver_post(message, url: str, context: ContextTypes.DEFAULT_TYPE) ->
         except Exception:
             logger.exception("Failed to download %s", url)
             await status_message.edit_text(
-                "Не получилось скачать публикацию. Если она приватная или Instagram просит вход, добавь cookies-файл в настройках."
+                "Не получилось скачать публикацию. Возможно, она закрытая или удалена. "
+                "Если ссылка открывается в Instagram, попробуй ещё раз чуть позже."
             )
             return
 
