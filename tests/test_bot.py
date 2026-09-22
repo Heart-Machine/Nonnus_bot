@@ -234,7 +234,7 @@ def test_download_post_keeps_mixed_carousel_order(monkeypatch, stub_downloads):
 
     assert [item.kind for item in items] == ["photo", "video", "photo"]
     assert items[1].path == video_path
-    assert caption == '<a href="https://www.instagram.com/p/ABC123/">@someone</a>'
+    assert caption == 'Пост <a href="https://www.instagram.com/p/ABC123/">@someone</a>'
 
 
 def test_download_post_warns_about_missing_audio_only_for_a_lone_video(monkeypatch, stub_downloads):
@@ -258,6 +258,7 @@ def test_download_post_warns_about_missing_audio_only_for_a_lone_video(monkeypat
     items, caption = bot.download_post("https://www.instagram.com/p/ABC123/", work_dir)
 
     assert [item.kind for item in items] == ["video"]
+    assert caption.startswith("Рилс ")
     assert calls == [video_path]
     assert caption.endswith("no audio")
 
@@ -473,11 +474,26 @@ def test_add_carousel_note_only_applies_to_a_carousel():
 )
 def test_build_post_caption_finds_the_author(info):
     caption = bot.build_post_caption({**info, "webpage_url": POST_URL}, POST_URL)
-    assert caption == f'<a href="{POST_URL}">@someone</a>'
+    assert caption == f'Пост <a href="{POST_URL}">@someone</a>'
 
 
 def test_build_post_caption_falls_back_to_the_url():
-    assert bot.build_post_caption({}, POST_URL) == POST_URL
+    assert bot.build_post_caption({}, POST_URL) == f"Пост {POST_URL}"
+
+
+def test_build_post_caption_takes_the_label():
+    caption = bot.build_post_caption({"channel": "someone"}, POST_URL, "Рилс")
+    assert caption == f'Рилс <a href="{POST_URL}">@someone</a>'
+
+
+def test_post_label_calls_a_lone_video_a_reel(tmp_path):
+    video = bot.MediaItem(tmp_path / "a.mp4", "video")
+    photo = bot.MediaItem(tmp_path / "b.jpg", "photo")
+
+    assert bot.post_label([video]) == "Рилс"
+    assert bot.post_label([photo]) == "Пост"
+    assert bot.post_label([video, photo]) == "Пост"
+    assert bot.post_label([video, video]) == "Пост"
 
 
 def test_build_post_caption_ignores_numeric_ids_and_section_paths():
@@ -485,7 +501,7 @@ def test_build_post_caption_ignores_numeric_ids_and_section_paths():
         {"uploader_id": "1234567", "uploader_url": "https://www.instagram.com/reel/ABC123/"},
         POST_URL,
     )
-    assert caption == POST_URL
+    assert caption == f"Пост {POST_URL}"
 
 
 def test_title_from_caption_reads_the_link_text():

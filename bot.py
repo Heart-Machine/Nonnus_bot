@@ -100,9 +100,11 @@ UPLOAD_TIMEOUTS: dict[str, Any] = {
     "connect_timeout": 30,
     "pool_timeout": 30,
 }
+# Bumped to 5: captions now start with "Пост" or "Рилс", and entries cached
+# before that would keep the old caption for as long as they stay cached.
 # Bumped to 4: a cache entry now holds a list of media items instead of one
 # file_id, so entries written by older versions can't be reused.
-INLINE_CACHE_VERSION = "4"
+INLINE_CACHE_VERSION = "5"
 INLINE_CACHE_FILE = Path(os.getenv("INLINE_CACHE_FILE", str(BASE_DIR / ".inline_cache.json"))).expanduser()
 if not INLINE_CACHE_FILE.is_absolute():
     INLINE_CACHE_FILE = BASE_DIR / INLINE_CACHE_FILE
@@ -358,7 +360,8 @@ def carousel_slideshow_message(url: str, cached_result: dict[str, Any]) -> Optio
         {
             "type": "slideshow",
             "blocks": slides,
-            "caption": {"text": [{"type": "url", "text": link_text, "url": post_url}]},
+            # A slideshow is always a carousel, so always a post.
+            "caption": {"text": ["Пост ", {"type": "url", "text": link_text, "url": post_url}]},
         }
     ]
 
@@ -562,7 +565,16 @@ def username_from_instagram_profile_url(value: Any) -> Optional[str]:
     return normalize_instagram_username(username)
 
 
-def build_post_caption(info: dict[str, Any], fallback_url: str) -> str:
+def post_label(items: list["MediaItem"]) -> str:
+    """"Рилс" for a lone video, "Пост" for anything else - a photo or a carousel.
+
+    Decided by what was downloaded rather than by the link: Instagram hands out
+    /p/ links to reels as readily as /reel/ ones, while a single video is what
+    it publishes as a reel either way."""
+    return "Рилс" if len(items) == 1 and items[0].is_video else "Пост"
+
+
+def build_post_caption(info: dict[str, Any], fallback_url: str, label: str = "Пост") -> str:
     post_url = info.get("webpage_url") or fallback_url
     author = next(
         (
@@ -585,9 +597,9 @@ def build_post_caption(info: dict[str, Any], fallback_url: str) -> str:
     )
 
     if author:
-        return f'<a href="{escape(str(post_url), quote=True)}">{escape(author)}</a>'
+        return f'{escape(label)} <a href="{escape(str(post_url), quote=True)}">{escape(author)}</a>'
 
-    return escape(str(post_url))
+    return f"{escape(label)} {escape(str(post_url))}"
 
 
 def video_file_has_audio(video_path: Path) -> bool:
@@ -1127,7 +1139,7 @@ def download_post(url: str, download_dir: Path) -> Tuple[list[MediaItem], str]:
     if not items:
         raise NoMediaInPostError("Failed to download any media from this post.")
 
-    caption = build_post_caption(info, url)
+    caption = build_post_caption(info, url, post_label(items))
     if len(items) == 1 and items[0].is_video:
         # Only meaningful for a lone video: in a carousel a silent clip next
         # to photos is normal, not a symptom of a stripped audio track.

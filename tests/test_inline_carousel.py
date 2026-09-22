@@ -231,14 +231,14 @@ def test_slideshow_keeps_every_file_in_carousel_order():
 def test_slideshow_caption_links_the_author_to_the_post():
     caption = bot.carousel_slideshow_message(POST_URL, cached_post(CAROUSEL))["blocks"][0]["caption"]
 
-    assert caption == {"text": [{"type": "url", "text": "@someone", "url": POST_URL}]}
+    assert caption == {"text": ["Пост ", {"type": "url", "text": "@someone", "url": POST_URL}]}
 
 
 def test_slideshow_caption_falls_back_to_the_url_without_an_author():
     cached = {**cached_post(CAROUSEL), "title": "Instagram"}
     caption = bot.carousel_slideshow_message(POST_URL, cached)["blocks"][0]["caption"]
 
-    assert caption["text"][0]["text"] == POST_URL
+    assert caption["text"][1]["text"] == POST_URL
 
 
 def test_slideshow_keeps_caption_notes_as_plain_paragraphs():
