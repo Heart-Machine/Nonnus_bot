@@ -222,7 +222,7 @@ def test_download_post_keeps_mixed_carousel_order(monkeypatch, stub_downloads):
     monkeypatch.setattr(
         bot,
         "probe_post",
-        lambda url, download_dir: {
+        lambda url, download_dir, use_cookies=True: {
             "entries": [photo_entry("a"), video_entry("b"), photo_entry("c")],
             "channel": "someone",
             "webpage_url": "https://www.instagram.com/p/ABC123/",
@@ -246,7 +246,7 @@ def test_download_post_warns_about_missing_audio_only_for_a_lone_video(monkeypat
     monkeypatch.setattr(
         bot,
         "probe_post",
-        lambda url, download_dir: {**video_entry("b"), "channel": "someone"},
+        lambda url, download_dir, use_cookies=True: {**video_entry("b"), "channel": "someone"},
     )
     monkeypatch.setattr(bot, "download_post_videos", lambda *args: {0: video_path})
     monkeypatch.setattr(
@@ -271,7 +271,7 @@ def test_download_post_skips_the_audio_warning_for_a_carousel(monkeypatch, stub_
     monkeypatch.setattr(
         bot,
         "probe_post",
-        lambda url, download_dir: {"entries": [video_entry("b"), photo_entry("c")]},
+        lambda url, download_dir, use_cookies=True: {"entries": [video_entry("b"), photo_entry("c")]},
     )
     monkeypatch.setattr(bot, "download_post_videos", lambda *args: {0: video_path})
     monkeypatch.setattr(
@@ -287,7 +287,7 @@ def test_download_post_skips_the_audio_warning_for_a_carousel(monkeypatch, stub_
 
 def test_download_post_raises_when_nothing_could_be_downloaded(monkeypatch, tmp_path):
     monkeypatch.setattr(
-        bot, "probe_post", lambda url, download_dir: {"entries": [photo_entry("a")]}
+        bot, "probe_post", lambda url, download_dir, use_cookies=True: {"entries": [photo_entry("a")]}
     )
     monkeypatch.setattr(bot, "download_photo", lambda entry, index, download_dir: None)
 
@@ -296,7 +296,7 @@ def test_download_post_raises_when_nothing_could_be_downloaded(monkeypatch, tmp_
 
 
 def test_download_post_reports_an_empty_post(monkeypatch, tmp_path):
-    monkeypatch.setattr(bot, "probe_post", lambda url, download_dir: {"entries": []})
+    monkeypatch.setattr(bot, "probe_post", lambda url, download_dir, use_cookies=True: {"entries": []})
 
     with pytest.raises(bot.NoMediaInPostError):
         bot.download_post("https://www.instagram.com/p/ABC123/", tmp_path)
