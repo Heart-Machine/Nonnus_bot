@@ -1,0 +1,21 @@
+# Runtime dependencies as intent: what the bot needs, not which exact builds.
+# The exact versions - including everything pulled in transitively - live in
+# the generated requirements.txt, which is what the image installs.
+#
+# After editing this file, regenerate the lock:
+#
+#     pip-compile requirements.in
+#
+# To move the pins forward on purpose:
+#
+#     pip-compile --upgrade requirements.in
+#
+python-telegram-bot>=21,<23
+
+# Instagram changes its markup and endpoints constantly, so this is the
+# dependency that goes stale fastest. It is pinned in the lock like everything
+# else, on purpose: when the bot stops downloading, an unchanged pin says the
+# cause is Instagram rather than a silent dependency bump.
+yt-dlp>=2025.1.15
+
+python-dotenv>=1.0.1
