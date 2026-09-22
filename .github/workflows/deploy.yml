@@ -19,7 +19,11 @@ jobs:
 
   build:
     name: Build and push image
-    runs-on: ubuntu-latest
+    # Pinned rather than ubuntu-latest, which GitHub moves to a new Ubuntu
+    # release on its own schedule - the next move is to Ubuntu 26. Pinning
+    # means the runner changes when this line changes, not on an announcement,
+    # so a build that worked yesterday works today. Bump it deliberately.
+    runs-on: ubuntu-24.04
     needs: test
     outputs:
       image: ${{ steps.image.outputs.image }}
@@ -57,7 +61,7 @@ jobs:
 
   deploy:
     name: Deploy over SSH
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: build
     environment: production
     steps:
