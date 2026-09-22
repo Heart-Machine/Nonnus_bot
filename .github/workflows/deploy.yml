@@ -84,8 +84,13 @@ jobs:
           VIDEO_COMPRESSION_MIN_VIDEO_KBPS: ${{ vars.VIDEO_COMPRESSION_MIN_VIDEO_KBPS || '250' }}
           DEPLOY_PATH: ${{ vars.DEPLOY_PATH }}
           INSTAGRAM_COOKIES_B64: ${{ secrets.INSTAGRAM_COOKIES_B64 }}
-          GHCR_USERNAME: ${{ secrets.GHCR_USERNAME }}
-          GHCR_TOKEN: ${{ secrets.GHCR_TOKEN }}
+          # The run's own token rather than a stored one. It already has
+          # package access through the packages: write permission above, and
+          # it dies with the job - which is all the lifetime needed, since the
+          # pull happens inside the job. Nothing long-lived to store, rotate,
+          # or discover has silently expired.
+          GHCR_USERNAME: ${{ github.actor }}
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           host: ${{ secrets.SSH_HOST }}
           username: ${{ secrets.SSH_USER }}
