@@ -98,6 +98,11 @@ PHOTO_DOWNLOAD_TIMEOUT_SECONDS = int(os.getenv("PHOTO_DOWNLOAD_TIMEOUT_SECONDS",
 MAX_PARALLEL_DOWNLOADS = max(1, int(os.getenv("MAX_PARALLEL_DOWNLOADS", "3")))
 
 
+# A public Instagram post the bot downloads once a day, to notice when
+# Instagram has broken yt-dlp before users do. Empty turns the check off.
+CANARY_POST_URL = os.getenv("CANARY_POST_URL", "").strip()
+
+
 INLINE_CACHE_DB = Path(os.getenv("INLINE_CACHE_DB", str(BASE_DIR / ".inline_cache.sqlite3"))).expanduser()
 
 

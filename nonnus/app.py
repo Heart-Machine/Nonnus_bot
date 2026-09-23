@@ -14,7 +14,7 @@ from telegram.ext import (
     filters,
 )
 
-from nonnus import config, inline, handlers
+from nonnus import config, inline, handlers, canary
 
 
 logging.basicConfig(
@@ -51,6 +51,14 @@ async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
         logger.warning("Could not tell the user about the error either", exc_info=True)
 
 
+async def start_background_jobs(application: Application) -> None:
+    application.bot_data["canary_task"] = canary.start(application.bot)
+
+
+async def stop_background_jobs(application: Application) -> None:
+    await canary.stop(application.bot_data.pop("canary_task", None))
+
+
 def build_application(token: str) -> Application:
     app = (
         Application.builder()
@@ -62,6 +70,8 @@ def build_application(token: str) -> Application:
         # Without this the library handles one update at a time, and every
         # user waits while anyone's post downloads.
         .concurrent_updates(True)
+        .post_init(start_background_jobs)
+        .post_stop(stop_background_jobs)
         .build()
     )
     app.add_handler(CommandHandler("start", handlers.start))
