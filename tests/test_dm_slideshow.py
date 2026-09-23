@@ -13,7 +13,7 @@ from telegram import Bot
 from telegram.error import BadRequest
 from telegram.request import BaseRequest
 
-import bot
+from nonnus import delivery
 
 POST_URL = "https://www.instagram.com/p/ABC123/"
 CAROUSEL = [{"type": "photo", "file_id": "p1"}, {"type": "video", "file_id": "v1"}]
@@ -62,7 +62,7 @@ class FakeMessage:
 
 
 def send(message, items):
-    asyncio.run(bot.send_prepared_result(message, cached_post(items), POST_URL))
+    asyncio.run(delivery.send_prepared_result(message, cached_post(items), POST_URL))
 
 
 def test_a_carousel_goes_out_as_one_slideshow():
@@ -72,7 +72,7 @@ def test_a_carousel_goes_out_as_one_slideshow():
     assert message.bot_instance.api_calls == [
         (
             "sendRichMessage",
-            {"chat_id": 42, "rich_message": bot.carousel_slideshow_message(POST_URL, cached_post(CAROUSEL))},
+            {"chat_id": 42, "rich_message": delivery.carousel_slideshow_message(POST_URL, cached_post(CAROUSEL))},
         )
     ]
     assert message.replies == []
@@ -154,6 +154,6 @@ def test_the_request_that_reaches_telegram():
     assert parameters["chat_id"] == "42"
     assert json.loads(parameters["reply_parameters"]) == {"message_id": 7}
     # The library JSON-encodes the nested dict itself; it arrives intact.
-    assert json.loads(parameters["rich_message"]) == bot.carousel_slideshow_message(
+    assert json.loads(parameters["rich_message"]) == delivery.carousel_slideshow_message(
         POST_URL, cached_post(CAROUSEL)
     )

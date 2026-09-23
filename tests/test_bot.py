@@ -1,4 +1,4 @@
-"""Tests for the pure logic in bot.py.
+"""Tests for the pure logic of the bot.
 
 Nothing here touches the network or Telegram: the pieces that do are replaced
 with stand-ins, so what gets exercised is the decision-making around them -
@@ -8,7 +8,7 @@ what gets handed to Telegram.
 
 import pytest
 
-import bot
+from nonnus import config, links, media, instagram, cache, delivery, inline
 
 
 # --- link recognition --------------------------------------------------
@@ -50,17 +50,17 @@ import bot
     ],
 )
 def test_find_instagram_url_extracts_the_link(text, expected):
-    assert bot.find_instagram_url(text) == expected
+    assert links.find_instagram_url(text) == expected
 
 
 def test_find_instagram_url_ignores_trailing_punctuation():
-    found = bot.find_instagram_url("глянь https://www.instagram.com/p/ABC123/, там карусель")
+    found = links.find_instagram_url("глянь https://www.instagram.com/p/ABC123/, там карусель")
     assert found == "https://www.instagram.com/p/ABC123/"
 
 
 @pytest.mark.parametrize("text", ["", "просто текст", "https://example.com/p/ABC123/"])
 def test_find_instagram_url_returns_none_without_a_link(text):
-    assert bot.find_instagram_url(text) is None
+    assert links.find_instagram_url(text) is None
 
 
 @pytest.mark.parametrize(
@@ -77,17 +77,17 @@ def test_find_instagram_url_returns_none_without_a_link(text):
     ],
 )
 def test_normalize_post_url_collapses_aliases_and_query(url):
-    assert bot.normalize_post_url(url) == "https://www.instagram.com/p/ABC123/"
+    assert links.normalize_post_url(url) == "https://www.instagram.com/p/ABC123/"
 
 
 def test_normalize_post_url_is_not_fooled_by_a_username_that_looks_like_a_type():
     # Read from the end of the path: the code comes last, the type right
     # before it, whatever the username says.
-    assert bot.normalize_post_url("https://www.instagram.com/reel/p/ABC123/") == "https://www.instagram.com/p/ABC123/"
+    assert links.normalize_post_url("https://www.instagram.com/reel/p/ABC123/") == "https://www.instagram.com/p/ABC123/"
 
 
 def test_a_profile_link_and_a_plain_link_share_one_cache_entry():
-    assert bot.inline_result_id("https://www.instagram.com/someone/p/ABC123/") == bot.inline_result_id(
+    assert inline.inline_result_id("https://www.instagram.com/someone/p/ABC123/") == inline.inline_result_id(
         "https://www.instagram.com/p/ABC123/"
     )
 
@@ -111,19 +111,19 @@ def photo_entry(entry_id="p1"):
 
 
 def test_entry_has_video_needs_a_usable_format():
-    assert bot.entry_has_video(video_entry()) is True
-    assert bot.entry_has_video(photo_entry()) is False
-    assert bot.entry_has_video({"formats": [{}]}) is False
-    assert bot.entry_has_video({}) is False
+    assert instagram.entry_has_video(video_entry()) is True
+    assert instagram.entry_has_video(photo_entry()) is False
+    assert instagram.entry_has_video({"formats": [{}]}) is False
+    assert instagram.entry_has_video({}) is False
 
 
 def test_best_photo_url_picks_the_largest_candidate():
-    assert bot.best_photo_url(photo_entry()) == "https://cdn/p1-big.webp"
+    assert instagram.best_photo_url(photo_entry()) == "https://cdn/p1-big.webp"
 
 
 def test_best_photo_url_falls_back_to_the_single_thumbnail():
-    assert bot.best_photo_url({"thumbnail": "https://cdn/only.jpg"}) == "https://cdn/only.jpg"
-    assert bot.best_photo_url({}) is None
+    assert instagram.best_photo_url({"thumbnail": "https://cdn/only.jpg"}) == "https://cdn/only.jpg"
+    assert instagram.best_photo_url({}) is None
 
 
 def cdn(stp=None, path="/v/t51.2885-15/541_902_n.jpg"):
@@ -144,7 +144,7 @@ def test_best_photo_url_skips_square_crops_that_come_first():
     original = cdn("dst-jpg_e35_tt6")
     frames = [cdn("dst-jpg_e35_p1080x1080_tt6"), cdn("dst-jpg_e35_p320x320_tt6"), cdn("dst-jpg_e35_s640x640_tt6")]
 
-    assert bot.best_photo_url(logged_out(*crops, *frames, original)) == original
+    assert instagram.best_photo_url(logged_out(*crops, *frames, original)) == original
 
 
 def test_best_photo_url_takes_the_original_when_it_comes_first():
@@ -152,20 +152,20 @@ def test_best_photo_url_takes_the_original_when_it_comes_first():
     original = cdn()
     copies = [cdn(f"dst-webp_s{n}x{n}") for n in (1080, 150, 240, 750)]
 
-    assert bot.best_photo_url(logged_out(original, *copies)) == original
+    assert instagram.best_photo_url(logged_out(original, *copies)) == original
 
 
 def test_best_photo_url_takes_the_largest_bound_without_an_original():
     small, large = cdn("dst-jpg_e35_p640x640"), cdn("dst-jpg_e35_p1080x1080")
     crop = cdn("c0.240.1440.1440a_dst-jpg_e35_s1440x1440")
 
-    assert bot.best_photo_url(logged_out(small, crop, large)) == large
+    assert instagram.best_photo_url(logged_out(small, crop, large)) == large
 
 
 def test_best_photo_url_still_returns_something_when_there_are_only_crops():
     small, large = cdn("c0.240.1440.1440a_s320x320"), cdn("c0.240.1440.1440a_s1080x1080")
 
-    assert bot.best_photo_url(logged_out(small, large)) == large
+    assert instagram.best_photo_url(logged_out(small, large)) == large
 
 
 def test_best_photo_url_reads_markers_from_the_path_of_older_links():
@@ -173,7 +173,7 @@ def test_best_photo_url_reads_markers_from_the_path_of_older_links():
     copy = cdn(path="/v/t51.2885-15/s640x640/541_n.jpg")
     original = cdn(path="/v/t51.2885-15/541_n.jpg")
 
-    assert bot.best_photo_url(logged_out(crop, copy, original)) == original
+    assert instagram.best_photo_url(logged_out(crop, copy, original)) == original
 
 
 def test_best_photo_url_prefers_the_full_frame_even_when_sizes_are_known():
@@ -186,22 +186,22 @@ def test_best_photo_url_prefers_the_full_frame_even_when_sizes_are_known():
         ]
     }
 
-    assert bot.best_photo_url(entry) == cdn("dst-jpg_e35")
+    assert instagram.best_photo_url(entry) == cdn("dst-jpg_e35")
 
 
 def test_post_entries_wraps_a_single_medium_post():
     entry = video_entry()
-    assert bot.post_entries(entry) == [entry]
+    assert instagram.post_entries(entry) == [entry]
 
 
 def test_post_entries_keeps_carousel_order_and_drops_blanks():
     first, second = photo_entry("a"), video_entry("b")
-    assert bot.post_entries({"entries": [first, None, second]}) == [first, second]
+    assert instagram.post_entries({"entries": [first, None, second]}) == [first, second]
 
 
 def test_post_entries_handles_a_lazy_entries_iterable():
     entries = iter([photo_entry("a"), video_entry("b")])
-    assert len(bot.post_entries({"entries": entries})) == 2
+    assert len(instagram.post_entries({"entries": entries})) == 2
 
 
 # --- mapping downloaded videos back onto carousel positions ------------
@@ -232,7 +232,7 @@ class FakeYoutubeDL:
 def fake_ydl(monkeypatch):
     FakeYoutubeDL.captured_opts = []
     FakeYoutubeDL.result = {}
-    monkeypatch.setattr(bot, "YoutubeDL", FakeYoutubeDL)
+    monkeypatch.setattr(instagram, "YoutubeDL", FakeYoutubeDL)
     return FakeYoutubeDL
 
 
@@ -250,7 +250,7 @@ def test_download_post_videos_maps_results_onto_carousel_positions(fake_ydl, tmp
     }
     entries = [photo_entry("a"), video_entry("b"), photo_entry("c"), video_entry("d"), photo_entry("e")]
 
-    video_paths = bot.download_post_videos("https://x/", tmp_path, entries, [1, 3])
+    video_paths = instagram.download_post_videos("https://x/", tmp_path, entries, [1, 3])
 
     assert video_paths == {1: second, 3: fourth}
     # playlist_items is 1-based, so positions 1 and 3 are items 2 and 4.
@@ -262,7 +262,7 @@ def test_download_post_videos_skips_playlist_items_for_a_single_medium_post(fake
     only.write_bytes(b"video")
     fake_ydl.result = {"id": "a", "requested_downloads": [{"filepath": str(only)}]}
 
-    video_paths = bot.download_post_videos("https://x/", tmp_path, [video_entry("a")], [0])
+    video_paths = instagram.download_post_videos("https://x/", tmp_path, [video_entry("a")], [0])
 
     assert video_paths == {0: only}
     assert "playlist_items" not in fake_ydl.captured_opts[0]
@@ -277,7 +277,7 @@ def test_download_post_videos_falls_back_to_the_largest_video_file(fake_ydl, tmp
     # yt-dlp reported no filepath at all.
     fake_ydl.result = {"id": "a"}
 
-    video_paths = bot.download_post_videos("https://x/", tmp_path, [video_entry("a")], [0])
+    video_paths = instagram.download_post_videos("https://x/", tmp_path, [video_entry("a")], [0])
 
     # The cookie file shares the directory and must not be mistaken for media.
     assert video_paths == {0: biggest}
@@ -295,9 +295,9 @@ def stub_downloads(monkeypatch, tmp_path):
         path.write_bytes(b"photo")
         return path
 
-    monkeypatch.setattr(bot, "download_photo", fake_download_photo)
-    monkeypatch.setattr(bot, "prepare_photo_for_upload", lambda path, work_dir: path)
-    monkeypatch.setattr(bot, "ensure_h264_video", lambda path, work_dir: path)
+    monkeypatch.setattr(instagram, "download_photo", fake_download_photo)
+    monkeypatch.setattr(media, "prepare_photo_for_upload", lambda path, work_dir: path)
+    monkeypatch.setattr(media, "ensure_h264_video", lambda path, work_dir: path)
     return tmp_path
 
 
@@ -307,7 +307,7 @@ def test_download_post_keeps_mixed_carousel_order(monkeypatch, stub_downloads):
     video_path.write_bytes(b"video")
 
     monkeypatch.setattr(
-        bot,
+        instagram,
         "probe_post",
         lambda url, download_dir, use_cookies=True: {
             "entries": [photo_entry("a"), video_entry("b"), photo_entry("c")],
@@ -315,9 +315,9 @@ def test_download_post_keeps_mixed_carousel_order(monkeypatch, stub_downloads):
             "webpage_url": "https://www.instagram.com/p/ABC123/",
         },
     )
-    monkeypatch.setattr(bot, "download_post_videos", lambda *args: {1: video_path})
+    monkeypatch.setattr(instagram, "download_post_videos", lambda *args: {1: video_path})
 
-    items, caption = bot.download_post("https://www.instagram.com/p/ABC123/", work_dir)
+    items, caption = instagram.download_post("https://www.instagram.com/p/ABC123/", work_dir)
 
     assert [item.kind for item in items] == ["photo", "video", "photo"]
     assert items[1].path == video_path
@@ -331,18 +331,18 @@ def test_download_post_warns_about_missing_audio_only_for_a_lone_video(monkeypat
     calls = []
 
     monkeypatch.setattr(
-        bot,
+        instagram,
         "probe_post",
         lambda url, download_dir, use_cookies=True: {**video_entry("b"), "channel": "someone"},
     )
-    monkeypatch.setattr(bot, "download_post_videos", lambda *args: {0: video_path})
+    monkeypatch.setattr(instagram, "download_post_videos", lambda *args: {0: video_path})
     monkeypatch.setattr(
-        bot,
+        media,
         "add_audio_warning_if_needed",
         lambda caption, path: calls.append(path) or f"{caption}\n\nno audio",
     )
 
-    items, caption = bot.download_post("https://www.instagram.com/p/ABC123/", work_dir)
+    items, caption = instagram.download_post("https://www.instagram.com/p/ABC123/", work_dir)
 
     assert [item.kind for item in items] == ["video"]
     assert caption.startswith("Рилс ")
@@ -356,42 +356,42 @@ def test_download_post_skips_the_audio_warning_for_a_carousel(monkeypatch, stub_
     video_path.write_bytes(b"video")
 
     monkeypatch.setattr(
-        bot,
+        instagram,
         "probe_post",
         lambda url, download_dir, use_cookies=True: {"entries": [video_entry("b"), photo_entry("c")]},
     )
-    monkeypatch.setattr(bot, "download_post_videos", lambda *args: {0: video_path})
+    monkeypatch.setattr(instagram, "download_post_videos", lambda *args: {0: video_path})
     monkeypatch.setattr(
-        bot,
+        media,
         "add_audio_warning_if_needed",
         lambda caption, path: pytest.fail("a carousel must not get the audio warning"),
     )
 
-    items, _ = bot.download_post("https://www.instagram.com/p/ABC123/", work_dir)
+    items, _ = instagram.download_post("https://www.instagram.com/p/ABC123/", work_dir)
 
     assert len(items) == 2
 
 
 def test_download_post_raises_when_nothing_could_be_downloaded(monkeypatch, tmp_path):
     monkeypatch.setattr(
-        bot, "probe_post", lambda url, download_dir, use_cookies=True: {"entries": [photo_entry("a")]}
+        instagram, "probe_post", lambda url, download_dir, use_cookies=True: {"entries": [photo_entry("a")]}
     )
-    monkeypatch.setattr(bot, "download_photo", lambda entry, index, download_dir: None)
+    monkeypatch.setattr(instagram, "download_photo", lambda entry, index, download_dir: None)
 
-    with pytest.raises(bot.NoMediaInPostError):
-        bot.download_post("https://www.instagram.com/p/ABC123/", tmp_path)
+    with pytest.raises(instagram.NoMediaInPostError):
+        instagram.download_post("https://www.instagram.com/p/ABC123/", tmp_path)
 
 
 def test_download_post_reports_an_empty_post(monkeypatch, tmp_path):
-    monkeypatch.setattr(bot, "probe_post", lambda url, download_dir, use_cookies=True: {"entries": []})
+    monkeypatch.setattr(instagram, "probe_post", lambda url, download_dir, use_cookies=True: {"entries": []})
 
-    with pytest.raises(bot.NoMediaInPostError):
-        bot.download_post("https://www.instagram.com/p/ABC123/", tmp_path)
+    with pytest.raises(instagram.NoMediaInPostError):
+        instagram.download_post("https://www.instagram.com/p/ABC123/", tmp_path)
 
 
 def test_download_photo_refuses_a_non_http_url(tmp_path):
     entry = {"thumbnail": "file:///etc/passwd"}
-    assert bot.download_photo(entry, 0, tmp_path) is None
+    assert instagram.download_photo(entry, 0, tmp_path) is None
 
 
 # --- preparing files for Telegram --------------------------------------
@@ -406,15 +406,15 @@ def test_prepare_items_for_upload_leaves_photos_alone(monkeypatch, tmp_path):
     compressed_video.write_bytes(b"small")
 
     monkeypatch.setattr(
-        bot, "prepare_video_for_upload", lambda path, work_dir: (compressed_video, True)
+        media, "prepare_video_for_upload", lambda path, work_dir: (compressed_video, True)
     )
 
-    items, compressed = bot.prepare_items_for_upload(
-        [bot.MediaItem(photo, "photo"), bot.MediaItem(video, "video")], tmp_path
+    items, compressed = media.prepare_items_for_upload(
+        [media.MediaItem(photo, "photo"), media.MediaItem(video, "video")], tmp_path
     )
 
     assert compressed is True
-    assert items == [bot.MediaItem(photo, "photo"), bot.MediaItem(compressed_video, "video")]
+    assert items == [media.MediaItem(photo, "photo"), media.MediaItem(compressed_video, "video")]
 
 
 def test_ensure_items_fit_telegram_accepts_files_within_the_limits(tmp_path):
@@ -423,44 +423,44 @@ def test_ensure_items_fit_telegram_accepts_files_within_the_limits(tmp_path):
     video = tmp_path / "b.mp4"
     video.write_bytes(b"x" * 1024)
 
-    bot.ensure_items_fit_telegram([bot.MediaItem(photo, "photo"), bot.MediaItem(video, "video")])
+    media.ensure_items_fit_telegram([media.MediaItem(photo, "photo"), media.MediaItem(video, "video")])
 
 
 def test_ensure_items_fit_telegram_rejects_an_oversized_video(tmp_path):
     video = tmp_path / "b.mp4"
-    video.write_bytes(b"x" * (bot.MAX_FILE_SIZE_BYTES + 1))
+    video.write_bytes(b"x" * (config.MAX_FILE_SIZE_BYTES + 1))
 
-    with pytest.raises(bot.MediaTooLargeError):
-        bot.ensure_items_fit_telegram([bot.MediaItem(video, "video")])
+    with pytest.raises(media.MediaTooLargeError):
+        media.ensure_items_fit_telegram([media.MediaItem(video, "video")])
 
 
 def test_ensure_items_fit_telegram_holds_photos_to_their_own_lower_limit(tmp_path):
     # Comfortably under the video ceiling, over the photo one.
-    assert bot.PHOTO_MAX_FILE_SIZE_BYTES < bot.MAX_FILE_SIZE_BYTES
+    assert config.PHOTO_MAX_FILE_SIZE_BYTES < config.MAX_FILE_SIZE_BYTES
     photo = tmp_path / "a.jpg"
-    photo.write_bytes(b"x" * (bot.PHOTO_MAX_FILE_SIZE_BYTES + 1))
+    photo.write_bytes(b"x" * (config.PHOTO_MAX_FILE_SIZE_BYTES + 1))
 
-    with pytest.raises(bot.MediaTooLargeError):
-        bot.ensure_items_fit_telegram([bot.MediaItem(photo, "photo")])
+    with pytest.raises(media.MediaTooLargeError):
+        media.ensure_items_fit_telegram([media.MediaItem(photo, "photo")])
 
 
 def test_media_too_large_is_a_runtime_error():
-    assert issubclass(bot.MediaTooLargeError, RuntimeError)
+    assert issubclass(media.MediaTooLargeError, RuntimeError)
 
 
 # --- albums ------------------------------------------------------------
 
 
 def test_chunked_respects_the_album_limit():
-    assert [len(chunk) for chunk in bot.chunked(list(range(23)), bot.MEDIA_GROUP_LIMIT)] == [10, 10, 3]
+    assert [len(chunk) for chunk in delivery.chunked(list(range(23)), delivery.MEDIA_GROUP_LIMIT)] == [10, 10, 3]
 
 
 def test_chunked_of_nothing_is_nothing():
-    assert list(bot.chunked([], 10)) == []
+    assert list(delivery.chunked([], 10)) == []
 
 
 def test_media_group_limit_matches_telegram():
-    assert bot.MEDIA_GROUP_LIMIT == 10
+    assert delivery.MEDIA_GROUP_LIMIT == 10
 
 
 @pytest.mark.parametrize(
@@ -468,11 +468,11 @@ def test_media_group_limit_matches_telegram():
     [("photo", "photo"), ("video", "video"), ("document", "document")],
 )
 def test_build_input_media_maps_each_kind(kind, expected):
-    assert bot.build_input_media(kind, "file-id", "caption").type == expected
+    assert delivery.build_input_media(kind, "file-id", "caption").type == expected
 
 
 def test_build_input_media_asks_telegram_to_stream_video():
-    assert bot.build_input_media("video", "file-id", None).supports_streaming is True
+    assert delivery.build_input_media("video", "file-id", None).supports_streaming is True
 
 
 # --- inline results ----------------------------------------------------
@@ -483,7 +483,7 @@ POST_URL = "https://www.instagram.com/p/ABC123/"
 
 def cached_post(items):
     return {
-        "version": bot.INLINE_CACHE_VERSION,
+        "version": cache.INLINE_CACHE_VERSION,
         "caption": f'<a href="{POST_URL}">@someone</a>',
         "title": "@someone",
         "items": items,
@@ -491,22 +491,22 @@ def cached_post(items):
 
 
 def test_inline_item_result_id_keeps_the_bare_id_only_for_a_single_file():
-    base_id = bot.inline_result_id(POST_URL)
-    assert bot.inline_item_result_id(POST_URL, 0, 1) == base_id
+    base_id = inline.inline_result_id(POST_URL)
+    assert inline.inline_item_result_id(POST_URL, 0, 1) == base_id
     # The first file of a carousel must not share the placeholder's bare id:
     # that difference is how the chosen-result handler tells them apart.
-    assert bot.inline_item_result_id(POST_URL, 0, 5) == f"{base_id}-0"
-    assert bot.inline_item_result_id(POST_URL, 2, 5) == f"{base_id}-2"
+    assert inline.inline_item_result_id(POST_URL, 0, 5) == f"{base_id}-0"
+    assert inline.inline_item_result_id(POST_URL, 2, 5) == f"{base_id}-2"
 
 
 def test_inline_result_id_fits_telegram_limit():
     # Telegram rejects inline result ids longer than 64 bytes, and a carousel
     # position gets appended to this.
-    assert len(bot.inline_result_id(POST_URL)) <= 32
+    assert len(inline.inline_result_id(POST_URL)) <= 32
 
 
 def test_build_inline_results_offers_every_file_of_a_carousel():
-    results = bot.build_inline_results(
+    results = inline.build_inline_results(
         POST_URL,
         cached_post(
             [
@@ -524,16 +524,16 @@ def test_build_inline_results_offers_every_file_of_a_carousel():
 
 
 def test_build_inline_results_keeps_a_single_file_plain():
-    results = bot.build_inline_results(POST_URL, cached_post([{"type": "video", "file_id": "v"}]))
+    results = inline.build_inline_results(POST_URL, cached_post([{"type": "video", "file_id": "v"}]))
 
     assert len(results) == 1
-    assert results[0].id == bot.inline_result_id(POST_URL)
+    assert results[0].id == inline.inline_result_id(POST_URL)
     assert results[0].title == "@someone"
     assert "Файл" not in results[0].caption
 
 
 def test_build_inline_results_falls_back_to_the_url_without_a_caption():
-    results = bot.build_inline_results(
+    results = inline.build_inline_results(
         POST_URL, {"items": [{"type": "photo", "file_id": "p"}]}
     )
 
@@ -542,8 +542,8 @@ def test_build_inline_results_falls_back_to_the_url_without_a_caption():
 
 
 def test_add_carousel_note_only_applies_to_a_carousel():
-    assert bot.add_carousel_note_if_needed("caption", 0, 1) == "caption"
-    assert "Файл 3 из 7" in bot.add_carousel_note_if_needed("caption", 2, 7)
+    assert inline.add_carousel_note_if_needed("caption", 0, 1) == "caption"
+    assert "Файл 3 из 7" in inline.add_carousel_note_if_needed("caption", 2, 7)
 
 
 # --- captions ----------------------------------------------------------
@@ -560,31 +560,31 @@ def test_add_carousel_note_only_applies_to_a_carousel():
     ],
 )
 def test_build_post_caption_finds_the_author(info):
-    caption = bot.build_post_caption({**info, "webpage_url": POST_URL}, POST_URL)
+    caption = instagram.build_post_caption({**info, "webpage_url": POST_URL}, POST_URL)
     assert caption == f'Пост <a href="{POST_URL}">@someone</a>'
 
 
 def test_build_post_caption_falls_back_to_the_url():
-    assert bot.build_post_caption({}, POST_URL) == f"Пост {POST_URL}"
+    assert instagram.build_post_caption({}, POST_URL) == f"Пост {POST_URL}"
 
 
 def test_build_post_caption_takes_the_label():
-    caption = bot.build_post_caption({"channel": "someone"}, POST_URL, "Рилс")
+    caption = instagram.build_post_caption({"channel": "someone"}, POST_URL, "Рилс")
     assert caption == f'Рилс <a href="{POST_URL}">@someone</a>'
 
 
 def test_post_label_calls_a_lone_video_a_reel(tmp_path):
-    video = bot.MediaItem(tmp_path / "a.mp4", "video")
-    photo = bot.MediaItem(tmp_path / "b.jpg", "photo")
+    video = media.MediaItem(tmp_path / "a.mp4", "video")
+    photo = media.MediaItem(tmp_path / "b.jpg", "photo")
 
-    assert bot.post_label([video]) == "Рилс"
-    assert bot.post_label([photo]) == "Пост"
-    assert bot.post_label([video, photo]) == "Пост"
-    assert bot.post_label([video, video]) == "Пост"
+    assert instagram.post_label([video]) == "Рилс"
+    assert instagram.post_label([photo]) == "Пост"
+    assert instagram.post_label([video, photo]) == "Пост"
+    assert instagram.post_label([video, video]) == "Пост"
 
 
 def test_build_post_caption_ignores_numeric_ids_and_section_paths():
-    caption = bot.build_post_caption(
+    caption = instagram.build_post_caption(
         {"uploader_id": "1234567", "uploader_url": "https://www.instagram.com/reel/ABC123/"},
         POST_URL,
     )
@@ -592,10 +592,10 @@ def test_build_post_caption_ignores_numeric_ids_and_section_paths():
 
 
 def test_title_from_caption_reads_the_link_text():
-    assert bot.title_from_caption(f'<a href="{POST_URL}">@someone</a>') == "@someone"
-    assert bot.title_from_caption(POST_URL) == "Instagram"
+    assert delivery.title_from_caption(f'<a href="{POST_URL}">@someone</a>') == "@someone"
+    assert delivery.title_from_caption(POST_URL) == "Instagram"
 
 
 def test_add_compression_note_only_when_compressed():
-    assert bot.add_compression_note_if_needed("caption", False) == "caption"
-    assert "сжато" in bot.add_compression_note_if_needed("caption", True)
+    assert media.add_compression_note_if_needed("caption", False) == "caption"
+    assert "сжато" in media.add_compression_note_if_needed("caption", True)

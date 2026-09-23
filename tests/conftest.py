@@ -1,4 +1,4 @@
-"""Make bot.py importable and pin the settings the tests rely on.
+"""Make the nonnus package importable and pin the settings the tests rely on.
 
 python-dotenv leaves variables that are already in the environment alone, so
 whatever is set here wins over a developer's own .env file and the suite
@@ -24,10 +24,11 @@ os.environ["ENABLE_VIDEO_COMPRESSION"] = "true"
 @pytest.fixture(autouse=True)
 def post_cache(monkeypatch, tmp_path):
     """A cache database of its own for every test, so that no test reads or
-    writes the one next to bot.py, and none sees what another one cached."""
-    import bot
+    writes the one in the project root, and none sees what another one
+    cached."""
+    from nonnus import cache
 
-    cache = bot.PostCache(tmp_path / "inline_cache.sqlite3")
-    monkeypatch.setattr(bot, "POST_CACHE", cache)
-    yield cache
-    cache.close()
+    fresh = cache.PostCache(tmp_path / "inline_cache.sqlite3")
+    monkeypatch.setattr(cache, "POST_CACHE", fresh)
+    yield fresh
+    fresh.close()
