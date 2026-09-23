@@ -372,13 +372,14 @@ def test_download_post_skips_the_audio_warning_for_a_carousel(monkeypatch, stub_
     assert len(items) == 2
 
 
-def test_download_post_raises_when_nothing_could_be_downloaded(monkeypatch, tmp_path):
+def test_a_photo_that_would_not_download_is_not_taken_for_a_post_without_media(monkeypatch, tmp_path):
+    # It used to be: the user was told the post had no photo in it at all.
     monkeypatch.setattr(
         instagram, "probe_post", lambda url, download_dir, use_cookies=True: {"entries": [photo_entry("a")]}
     )
     monkeypatch.setattr(instagram, "download_photo", lambda entry, index, download_dir: None)
 
-    with pytest.raises(instagram.NoMediaInPostError):
+    with pytest.raises(instagram.IncompletePostError):
         instagram.download_post("https://www.instagram.com/p/ABC123/", tmp_path)
 
 
@@ -451,12 +452,29 @@ def test_media_too_large_is_a_runtime_error():
 # --- albums ------------------------------------------------------------
 
 
-def test_chunked_respects_the_album_limit():
-    assert [len(chunk) for chunk in delivery.chunked(list(range(23)), delivery.MEDIA_GROUP_LIMIT)] == [10, 10, 3]
+@pytest.mark.parametrize(
+    "count, sizes",
+    [
+        (1, [1]),
+        (2, [2]),
+        (10, [10]),
+        # Cut by ten, these would leave an album of one, which Telegram refuses.
+        (11, [6, 5]),
+        (21, [7, 7, 7]),
+        (12, [6, 6]),
+        (20, [10, 10]),
+        (23, [8, 8, 7]),
+    ],
+)
+def test_album_chunks_never_leave_an_album_of_one(count, sizes):
+    chunks = delivery.album_chunks(list(range(count)))
+
+    assert [len(chunk) for chunk in chunks] == sizes
+    assert [item for chunk in chunks for item in chunk] == list(range(count))
 
 
-def test_chunked_of_nothing_is_nothing():
-    assert list(delivery.chunked([], 10)) == []
+def test_album_chunks_of_nothing_is_nothing():
+    assert delivery.album_chunks([]) == []
 
 
 def test_media_group_limit_matches_telegram():

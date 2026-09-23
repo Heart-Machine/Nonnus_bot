@@ -112,12 +112,14 @@ def test_a_single_file_is_sent_as_itself():
 
 def test_a_carousel_with_a_document_goes_out_as_albums():
     # A document cannot be a slide, so the post is not offered as a
-    # slideshow at all rather than shown with a file missing.
+    # slideshow at all rather than shown with a file missing. Nor can it
+    # share an album with photos and videos - Telegram refuses the album -
+    # so it goes out on its own after them.
     message = FakeMessage()
     send(message, CAROUSEL + [{"type": "document", "file_id": "d1"}])
 
     assert message.bot_instance.api_calls == []
-    assert message.replies == [("album", ["p1", "v1", "d1"])]
+    assert message.replies == [("album", ["p1", "v1"]), ("document", "d1")]
 
 
 class RecordingRequest(BaseRequest):

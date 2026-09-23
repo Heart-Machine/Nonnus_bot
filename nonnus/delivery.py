@@ -5,7 +5,7 @@ import logging
 from html import unescape
 import re
 from contextlib import ExitStack
-from typing import Any, Iterator, Optional
+from typing import Any, Callable, Optional
 
 from telegram import InputMediaDocument, InputMediaPhoto, InputMediaVideo
 from telegram.constants import ParseMode
@@ -48,9 +48,45 @@ def title_from_caption(caption: str) -> str:
     return "Instagram"
 
 
-def chunked(items: list[Any], size: int) -> Iterator[list[Any]]:
-    for start in range(0, len(items), size):
-        yield items[start:start + size]
+def album_chunks(items: list[Any]) -> list[list[Any]]:
+    """Split files that may share an album into albums of 2 to
+    MEDIA_GROUP_LIMIT, as even as they come.
+
+    Telegram refuses an album of one, which cutting by ten leaves for an 11-
+    or 21-file carousel - and a carousel holds up to 20 files now. Split
+    evenly, 11 is 6 + 5 and 21 is 7 + 7 + 7, so only a lone file stays alone,
+    to be sent as a message of its own."""
+    if not items:
+        return []
+
+    count = -(-len(items) // MEDIA_GROUP_LIMIT)
+    size, larger = divmod(len(items), count)
+    chunks, start = [], 0
+    for number in range(count):
+        end = start + size + (1 if number < larger else 0)
+        chunks.append(items[start:end])
+        start = end
+
+    return chunks
+
+
+def album_groups(items: list[Any], kind: Callable[[Any], str]) -> list[list[Any]]:
+    """The messages a post goes out as, in its own order: albums of 2 to 10
+    files, and single files where one cannot share an album with the files
+    around it.
+
+    Telegram puts photos and videos in an album together, but a document only
+    with other documents - so a file it would take only as a document splits
+    the post around it, rather than failing the whole album."""
+    runs: list[list[Any]] = []
+    for item in items:
+        is_document = kind(item) == "document"
+        if runs and (kind(runs[-1][0]) == "document") == is_document:
+            runs[-1].append(item)
+        else:
+            runs.append([item])
+
+    return [chunk for run in runs for chunk in album_chunks(run)]
 
 
 def build_input_media(kind: str, media: Any, caption: Optional[str]) -> InputMediaPhoto | InputMediaDocument | InputMediaVideo:
@@ -192,18 +228,21 @@ async def upload_items_to_storage(
     so later requests for the same post - inline or direct - can be answered
     without downloading or uploading the bytes again."""
     storage_chat_id = parse_storage_chat_id()
-    if len(items) == 1:
-        return [await upload_item_to_storage(context, storage_chat_id, items[0], caption)]
-
     uploaded: list[dict[str, str]] = []
-    for chunk_index, chunk in enumerate(chunked(items, MEDIA_GROUP_LIMIT)):
+    for chunk in album_groups(items, lambda item: item.kind):
+        if len(chunk) == 1:
+            uploaded.append(
+                await upload_item_to_storage(context, storage_chat_id, chunk[0], caption if not uploaded else None)
+            )
+            continue
+
         sent_messages = None
         with ExitStack() as stack:
             media_group = [
                 build_input_media(
                     item.kind,
                     stack.enter_context(item.path.open("rb")),
-                    caption if chunk_index == 0 and position == 0 else None,
+                    caption if not uploaded and position == 0 else None,
                 )
                 for position, item in enumerate(chunk)
             ]
@@ -253,7 +292,8 @@ async def send_prepared_result(message, cached_result: dict[str, Any], url: str)
     A carousel goes out as a single slideshow message - one message however
     long the post, against one album per ten files. If Telegram turns the
     slideshow down it falls back to albums, as does a carousel that cannot be
-    a slideshow at all: one holding a file Telegram only took as a document."""
+    a slideshow at all: one holding a file Telegram only took as a document,
+    which then goes out on its own between the albums (see album_groups)."""
     items = cached_result.get("items") or []
     if not items:
         raise RuntimeError("Prepared result has no media")
@@ -267,39 +307,18 @@ async def send_prepared_result(message, cached_result: dict[str, Any], url: str)
             logger.exception("Telegram refused the carousel slideshow for %s, sending albums instead", url)
 
     caption = cached_result.get("caption", "")
-    if len(items) == 1:
-        item = items[0]
-        if item.get("type") == "document":
-            await message.reply_document(
-                document=item["file_id"],
-                caption=caption,
-                parse_mode=ParseMode.HTML,
-                **UPLOAD_TIMEOUTS,
-            )
-        elif item.get("type") == "photo":
-            await message.reply_photo(
-                photo=item["file_id"],
-                caption=caption,
-                parse_mode=ParseMode.HTML,
-                **UPLOAD_TIMEOUTS,
-            )
-        else:
-            await message.reply_video(
-                video=item["file_id"],
-                caption=caption,
-                parse_mode=ParseMode.HTML,
-                supports_streaming=True,
-                **UPLOAD_TIMEOUTS,
-            )
-        return
+    for chunk_index, chunk in enumerate(album_groups(items, lambda item: item.get("type", "video"))):
+        chunk_caption = caption if chunk_index == 0 else None
+        if len(chunk) == 1:
+            await send_cached_item(message, chunk[0], chunk_caption)
+            continue
 
-    for chunk_index, chunk in enumerate(chunked(items, MEDIA_GROUP_LIMIT)):
         await message.reply_media_group(
             media=[
                 build_input_media(
                     item.get("type", "video"),
                     item["file_id"],
-                    caption if chunk_index == 0 and position == 0 else None,
+                    chunk_caption if position == 0 else None,
                 )
                 for position, item in enumerate(chunk)
             ],
@@ -307,51 +326,83 @@ async def send_prepared_result(message, cached_result: dict[str, Any], url: str)
         )
 
 
+async def send_cached_item(message, item: dict[str, str], caption: Optional[str]) -> None:
+    """One already-uploaded file as a message of its own, by its file_id."""
+    if item.get("type") == "document":
+        await message.reply_document(
+            document=item["file_id"],
+            caption=caption,
+            parse_mode=ParseMode.HTML,
+            **UPLOAD_TIMEOUTS,
+        )
+    elif item.get("type") == "photo":
+        await message.reply_photo(
+            photo=item["file_id"],
+            caption=caption,
+            parse_mode=ParseMode.HTML,
+            **UPLOAD_TIMEOUTS,
+        )
+    else:
+        await message.reply_video(
+            video=item["file_id"],
+            caption=caption,
+            parse_mode=ParseMode.HTML,
+            supports_streaming=True,
+            **UPLOAD_TIMEOUTS,
+        )
+
+
 async def send_local_media_items(message, items: list[media.MediaItem], caption: str) -> None:
     """Send freshly downloaded files straight from disk - the path taken when
     no storage chat is configured, so there are no file_ids to reuse."""
-    if len(items) == 1:
-        item = items[0]
-        try:
-            with item.path.open("rb") as media_file:
-                if item.is_video:
-                    await message.reply_video(
-                        video=media_file,
-                        filename=item.path.name,
-                        caption=caption,
-                        parse_mode=ParseMode.HTML,
-                        supports_streaming=True,
-                        **media.video_send_hints(item.path),
-                        **UPLOAD_TIMEOUTS,
-                    )
-                else:
-                    await message.reply_photo(
-                        photo=media_file,
-                        filename=item.path.name,
-                        caption=caption,
-                        parse_mode=ParseMode.HTML,
-                        **UPLOAD_TIMEOUTS,
-                    )
-        except BadRequest:
-            logger.exception("Telegram refused the %s format, sending as document", item.kind)
-            with item.path.open("rb") as media_file:
-                await message.reply_document(
-                    document=media_file,
-                    filename=item.path.name,
-                    caption=caption,
-                    parse_mode=ParseMode.HTML,
-                    **UPLOAD_TIMEOUTS,
-                )
-        return
+    for chunk_index, chunk in enumerate(album_groups(items, lambda item: item.kind)):
+        chunk_caption = caption if chunk_index == 0 else None
+        if len(chunk) == 1:
+            await send_local_item(message, chunk[0], chunk_caption)
+            continue
 
-    for chunk_index, chunk in enumerate(chunked(items, MEDIA_GROUP_LIMIT)):
         with ExitStack() as stack:
             media_group = [
                 build_input_media(
                     item.kind,
                     stack.enter_context(item.path.open("rb")),
-                    caption if chunk_index == 0 and position == 0 else None,
+                    chunk_caption if position == 0 else None,
                 )
                 for position, item in enumerate(chunk)
             ]
             await message.reply_media_group(media=media_group, **UPLOAD_TIMEOUTS)
+
+
+async def send_local_item(message, item: media.MediaItem, caption: Optional[str]) -> None:
+    """One file from disk as a message of its own - as a document if Telegram
+    will not take it as a photo or video."""
+    try:
+        with item.path.open("rb") as media_file:
+            if item.is_video:
+                await message.reply_video(
+                    video=media_file,
+                    filename=item.path.name,
+                    caption=caption,
+                    parse_mode=ParseMode.HTML,
+                    supports_streaming=True,
+                    **media.video_send_hints(item.path),
+                    **UPLOAD_TIMEOUTS,
+                )
+            else:
+                await message.reply_photo(
+                    photo=media_file,
+                    filename=item.path.name,
+                    caption=caption,
+                    parse_mode=ParseMode.HTML,
+                    **UPLOAD_TIMEOUTS,
+                )
+    except BadRequest:
+        logger.exception("Telegram refused the %s format, sending as document", item.kind)
+        with item.path.open("rb") as media_file:
+            await message.reply_document(
+                document=media_file,
+                filename=item.path.name,
+                caption=caption,
+                parse_mode=ParseMode.HTML,
+                **UPLOAD_TIMEOUTS,
+            )

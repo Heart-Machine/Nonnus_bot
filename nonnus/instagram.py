@@ -1,6 +1,7 @@
 """Fetching a post from Instagram with yt-dlp: probing it, downloading its
 videos and photos, the cookies and the fallback without them, and the caption."""
 
+import http.client
 import logging
 from html import escape
 import re
@@ -69,6 +70,15 @@ class NoMediaInPostError(Exception):
     all - neither a video track nor a photo - distinct from a genuine
     download failure so the user gets an accurate message instead of being
     told to add cookies."""
+
+
+class IncompletePostError(Exception):
+    """Raised when some of a post's files could not be fetched.
+
+    The post then goes nowhere rather than out with a slide missing - above
+    all not into the file_id cache, which serves a post as it was saved to
+    every later request: a photo lost to one network hiccup would stay lost
+    for good, and without a word to anyone."""
 
 
 # Instagram's CDN serves signed media URLs to anyone, but it still wants a
@@ -383,21 +393,50 @@ def download_photo(entry: dict[str, Any], index: int, download_dir: Path) -> Opt
     headers = dict(INSTAGRAM_IMAGE_HEADERS)
     headers.update(entry.get("http_headers") or {})
 
+    for attempt in range(1, PHOTO_DOWNLOAD_ATTEMPTS + 1):
+        if fetch_photo(photo_url, headers, photo_path):
+            return photo_path
+        logger.warning("Photo %s of the post: attempt %d of %d failed", index, attempt, PHOTO_DOWNLOAD_ATTEMPTS)
+
+    return None
+
+
+# A failed photo now fails the whole post, so a single dropped connection is
+# worth one more try before that.
+PHOTO_DOWNLOAD_ATTEMPTS = 2
+
+
+def fetch_photo(url: str, headers: dict[str, str], photo_path: Path) -> bool:
+    """One try at fetching a photo into photo_path; False if it did not arrive
+    whole.
+
+    That includes a body that ends early. Python raises nothing when a
+    response stops short of its Content-Length and the server closes the
+    connection cleanly - the read just ends - so without the check here the
+    first part of a photo would go out, and into the cache, as the photo."""
     try:
-        request = urllib.request.Request(photo_url, headers=headers)
+        request = urllib.request.Request(url, headers=headers)
         with (
             urllib.request.urlopen(request, timeout=config.PHOTO_DOWNLOAD_TIMEOUT_SECONDS) as response,
             photo_path.open("wb") as photo_file,
         ):
             shutil.copyfileobj(response, photo_file)
-    except (OSError, ValueError):
-        logger.exception("Failed to download photo %s of the post", index)
-        return None
+            expected_size = response.headers.get("Content-Length")
+    # HTTPException is not an OSError: a chunked body cut short raises
+    # IncompleteRead, which would otherwise take the whole post down.
+    except (OSError, ValueError, http.client.HTTPException):
+        logger.exception("Failed to download %s", photo_path.name)
+        return False
 
-    if not photo_path.exists() or photo_path.stat().st_size == 0:
-        return None
+    size = photo_path.stat().st_size if photo_path.exists() else 0
+    if size == 0:
+        return False
 
-    return photo_path
+    if expected_size and expected_size.strip().isdigit() and int(expected_size) != size:
+        logger.warning("%s came up short: %d of %s bytes", photo_path.name, size, expected_size.strip())
+        return False
+
+    return True
 
 
 def download_post(url: str, download_dir: Path) -> Tuple[list[media.MediaItem], str]:
@@ -431,6 +470,7 @@ def download_post(url: str, download_dir: Path) -> Tuple[list[media.MediaItem], 
         )
 
     items: list[media.MediaItem] = []
+    missing: list[int] = []
     for index, entry in enumerate(entries):
         if index in video_paths:
             items.append(media.MediaItem(media.ensure_h264_video(video_paths[index], download_dir), "video"))
@@ -438,16 +478,19 @@ def download_post(url: str, download_dir: Path) -> Tuple[list[media.MediaItem], 
 
         if index in video_indices:
             logger.warning("yt-dlp downloaded no file for video %s of %s", index + 1, url)
+            missing.append(index)
             continue
 
         photo_path = download_photo(entry, index, download_dir)
         if photo_path is None:
+            missing.append(index)
             continue
 
         items.append(media.MediaItem(media.prepare_photo_for_upload(photo_path, download_dir), "photo"))
 
-    if not items:
-        raise NoMediaInPostError("Failed to download any media from this post.")
+    if missing:
+        positions = ", ".join(str(index + 1) for index in missing)
+        raise IncompletePostError(f"Could not fetch file(s) {positions} of {len(entries)} in {url}")
 
     caption = build_post_caption(info, url, post_label(items))
     if len(items) == 1 and items[0].is_video:
