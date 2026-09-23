@@ -1,11 +1,12 @@
 # Rules that catch mistakes rather than enforce a house style: pycodestyle
 # errors, pyflakes and bugbear.
 #
-# The isort (I) and pyupgrade (UP) rule sets stay off on purpose. bot.py sorts
-# its imports by module name regardless of `import x` / `from x import y`
-# form, which is consistent throughout the file but not what isort wants, and
-# its `Optional[...]` annotations are likewise used consistently. Turning those
-# rules on would mean restyling the whole file for no behavioural gain.
+# The isort (I) and pyupgrade (UP) rule sets stay off on purpose. The nonnus
+# package sorts its imports by module name regardless of `import x` /
+# `from x import y` form, which is consistent throughout but not what isort
+# wants, and its `Optional[...]` annotations are likewise used consistently.
+# Turning those rules on would mean restyling every module for no behavioural
+# gain.
 target-version = "py313"
 line-length = 120
 

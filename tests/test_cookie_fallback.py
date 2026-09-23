@@ -12,7 +12,7 @@ from types import SimpleNamespace
 import pytest
 from yt_dlp.utils import DownloadError
 
-import bot
+from nonnus import config, media, instagram, preparation
 
 INFO = {"id": "post"}
 
@@ -32,8 +32,8 @@ def clock():
 
 @pytest.fixture
 def session(monkeypatch, clock):
-    instance = bot.InstagramSession("cookies.txt", retry_after=60, alert_every=600, clock=clock)
-    monkeypatch.setattr(bot, "INSTAGRAM_SESSION", instance)
+    instance = instagram.InstagramSession("cookies.txt", retry_after=60, alert_every=600, clock=clock)
+    monkeypatch.setattr(instagram, "INSTAGRAM_SESSION", instance)
     return instance
 
 
@@ -45,7 +45,7 @@ def test_cookies_are_used_while_trusted(session):
 
 
 def test_no_cookie_file_means_no_cookies(clock):
-    assert bot.InstagramSession("", clock=clock).use_cookies() is False
+    assert instagram.InstagramSession("", clock=clock).use_cookies() is False
 
 
 def test_a_rejection_suspends_the_cookies_for_a_while(session, clock):
@@ -94,14 +94,14 @@ def fake_probe(monkeypatch, *, with_cookies, without_cookies):
             raise outcome
         return outcome
 
-    monkeypatch.setattr(bot, "probe_post", probe_post)
+    monkeypatch.setattr(instagram, "probe_post", probe_post)
     return tried
 
 
 def test_working_cookies_are_used_and_nothing_else_is_tried(monkeypatch, session, tmp_path):
     tried = fake_probe(monkeypatch, with_cookies=INFO, without_cookies=AssertionError("not reached"))
 
-    assert bot.probe_post_with_fallback("https://x/", tmp_path) == (INFO, True)
+    assert instagram.probe_post_with_fallback("https://x/", tmp_path) == (INFO, True)
     assert tried == ["cookies"]
     assert session.take_alert() is False
 
@@ -115,7 +115,7 @@ def test_turned_down_cookies_fall_back_and_raise_the_alert(monkeypatch, session,
         without_cookies=INFO,
     )
 
-    assert bot.probe_post_with_fallback("https://x/", tmp_path) == (INFO, False)
+    assert instagram.probe_post_with_fallback("https://x/", tmp_path) == (INFO, False)
     assert tried == ["cookies", "anonymous"]
     assert session.use_cookies() is False
     assert session.take_alert() is True
@@ -126,7 +126,7 @@ def test_a_post_failing_both_ways_is_blamed_on_the_post(monkeypatch, session, tm
     fake_probe(monkeypatch, with_cookies=cookie_error, without_cookies=DownloadError("login required"))
 
     with pytest.raises(DownloadError) as raised:
-        bot.probe_post_with_fallback("https://x/", tmp_path)
+        instagram.probe_post_with_fallback("https://x/", tmp_path)
 
     # The error of the primary route is the one reported, and the cookies
     # keep their standing: a private or deleted post says nothing about them.
@@ -140,15 +140,15 @@ def test_suspended_cookies_are_not_even_tried(monkeypatch, session, tmp_path):
     session.take_alert()
     tried = fake_probe(monkeypatch, with_cookies=AssertionError("not reached"), without_cookies=INFO)
 
-    assert bot.probe_post_with_fallback("https://x/", tmp_path) == (INFO, False)
+    assert instagram.probe_post_with_fallback("https://x/", tmp_path) == (INFO, False)
     assert tried == ["anonymous"]
 
 
 def test_without_a_cookie_file_only_the_logged_out_route_is_tried(monkeypatch, clock, tmp_path):
-    monkeypatch.setattr(bot, "INSTAGRAM_SESSION", bot.InstagramSession("", clock=clock))
+    monkeypatch.setattr(instagram, "INSTAGRAM_SESSION", instagram.InstagramSession("", clock=clock))
     tried = fake_probe(monkeypatch, with_cookies=AssertionError("not reached"), without_cookies=INFO)
 
-    assert bot.probe_post_with_fallback("https://x/", tmp_path) == (INFO, False)
+    assert instagram.probe_post_with_fallback("https://x/", tmp_path) == (INFO, False)
     assert tried == ["anonymous"]
 
 
@@ -168,11 +168,11 @@ def test_the_video_pass_takes_the_route_the_probe_took(monkeypatch, session, tmp
         video.write_bytes(b"video")
         return {0: video}
 
-    monkeypatch.setattr(bot, "download_post_videos", download_post_videos)
-    monkeypatch.setattr(bot, "ensure_h264_video", lambda path, work_dir: path)
-    monkeypatch.setattr(bot, "add_audio_warning_if_needed", lambda caption, path: caption)
+    monkeypatch.setattr(instagram, "download_post_videos", download_post_videos)
+    monkeypatch.setattr(media, "ensure_h264_video", lambda path, work_dir: path)
+    monkeypatch.setattr(media, "add_audio_warning_if_needed", lambda caption, path: caption)
 
-    bot.download_post("https://www.instagram.com/p/ABC123/", tmp_path)
+    instagram.download_post("https://www.instagram.com/p/ABC123/", tmp_path)
 
     assert routes == [False]
 
@@ -196,11 +196,11 @@ def test_the_video_pass_falls_back_on_its_own(monkeypatch, session, tmp_path):
         video.write_bytes(b"video")
         return {0: video}
 
-    monkeypatch.setattr(bot, "download_post_videos", download_post_videos)
-    monkeypatch.setattr(bot, "ensure_h264_video", lambda path, work_dir: path)
-    monkeypatch.setattr(bot, "add_audio_warning_if_needed", lambda caption, path: caption)
+    monkeypatch.setattr(instagram, "download_post_videos", download_post_videos)
+    monkeypatch.setattr(media, "ensure_h264_video", lambda path, work_dir: path)
+    monkeypatch.setattr(media, "add_audio_warning_if_needed", lambda caption, path: caption)
 
-    items, _ = bot.download_post("https://www.instagram.com/p/ABC123/", tmp_path)
+    items, _ = instagram.download_post("https://www.instagram.com/p/ABC123/", tmp_path)
 
     assert routes == [True, False]
     assert [item.kind for item in items] == ["video"]
@@ -216,14 +216,14 @@ def test_build_ydl_opts_leaves_the_cookies_out_when_told(monkeypatch, tmp_path):
     source.write_text("# Netscape HTTP Cookie File\n", encoding="utf-8")
     work = tmp_path / "work"
     work.mkdir()
-    monkeypatch.setattr(bot, "COOKIES_FILE", str(source))
+    monkeypatch.setattr(config, "COOKIES_FILE", str(source))
 
-    assert "cookiefile" in bot.build_ydl_opts(work)
-    assert "cookiefile" not in bot.build_ydl_opts(work, use_cookies=False)
+    assert "cookiefile" in instagram.build_ydl_opts(work)
+    assert "cookiefile" not in instagram.build_ydl_opts(work, use_cookies=False)
 
 
 def test_build_ydl_opts_keeps_progress_bars_out_of_the_log(tmp_path):
-    assert bot.build_ydl_opts(tmp_path)["noprogress"] is True
+    assert instagram.build_ydl_opts(tmp_path)["noprogress"] is True
 
 
 # --- the alert ------------------------------------------------------------
@@ -238,13 +238,13 @@ class RecordingBot:
 
 
 def test_the_alert_goes_to_the_storage_chat_once(monkeypatch, session):
-    monkeypatch.setattr(bot, "STORAGE_CHAT_ID", "-100123")
+    monkeypatch.setattr(config, "STORAGE_CHAT_ID", "-100123")
     telegram = RecordingBot()
     context = SimpleNamespace(bot=telegram)
 
     session.mark_rejected()
-    asyncio.run(bot.alert_if_cookies_rejected(context))
-    asyncio.run(bot.alert_if_cookies_rejected(context))
+    asyncio.run(preparation.alert_if_cookies_rejected(context))
+    asyncio.run(preparation.alert_if_cookies_rejected(context))
 
     assert len(telegram.sent) == 1
     assert telegram.sent[0]["chat_id"] == -100123
@@ -252,10 +252,10 @@ def test_the_alert_goes_to_the_storage_chat_once(monkeypatch, session):
 
 
 def test_no_alert_without_a_rejection(monkeypatch, session):
-    monkeypatch.setattr(bot, "STORAGE_CHAT_ID", "-100123")
+    monkeypatch.setattr(config, "STORAGE_CHAT_ID", "-100123")
     telegram = RecordingBot()
 
-    asyncio.run(bot.alert_if_cookies_rejected(SimpleNamespace(bot=telegram)))
+    asyncio.run(preparation.alert_if_cookies_rejected(SimpleNamespace(bot=telegram)))
 
     assert telegram.sent == []
 
@@ -264,16 +264,16 @@ def test_the_alert_goes_out_even_when_the_post_then_fails(monkeypatch, session):
     # The cookies were turned down, the logged-out route answered, and the
     # post still failed further on. The owner should hear about the cookies
     # regardless of how that one post ended.
-    monkeypatch.setattr(bot, "STORAGE_CHAT_ID", "-100123")
+    monkeypatch.setattr(config, "STORAGE_CHAT_ID", "-100123")
     telegram = RecordingBot()
 
     def download_post(url, download_dir):
-        bot.INSTAGRAM_SESSION.mark_rejected()
-        raise bot.NoMediaInPostError("nothing to download")
+        instagram.INSTAGRAM_SESSION.mark_rejected()
+        raise instagram.NoMediaInPostError("nothing to download")
 
-    monkeypatch.setattr(bot, "download_post", download_post)
+    monkeypatch.setattr(instagram, "download_post", download_post)
 
-    with pytest.raises(bot.NoMediaInPostError):
-        asyncio.run(bot.download_post_in_thread("https://x/", Path("."), SimpleNamespace(bot=telegram)))
+    with pytest.raises(instagram.NoMediaInPostError):
+        asyncio.run(preparation.download_post_in_thread("https://x/", Path("."), SimpleNamespace(bot=telegram)))
 
     assert len(telegram.sent) == 1

@@ -22,7 +22,13 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY bot.py .
+COPY nonnus/ ./nonnus/
 COPY assets/ ./assets/
+
+# Import everything once at build time. A module the COPY lines above miss,
+# or an asset path that no longer resolves, then fails the image build - in
+# CI, on the pull request - instead of the container on the server.
+RUN python -c "import bot, nonnus.app"
 
 RUN useradd --create-home --uid 10001 appuser \
     && mkdir -p /app/data /app/cookies \

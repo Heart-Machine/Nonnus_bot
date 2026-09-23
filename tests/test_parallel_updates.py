@@ -12,11 +12,11 @@ from types import SimpleNamespace
 
 import pytest
 
-import bot
+from nonnus import config, media, instagram, preparation, inline, app
 
 
 def test_the_application_handles_updates_concurrently():
-    assert bot.build_application("1:test").concurrent_updates > 1
+    assert app.build_application("1:test").concurrent_updates > 1
 
 
 class ConcurrencyMeter:
@@ -40,12 +40,12 @@ class ConcurrencyMeter:
 
 @pytest.fixture
 def two_slots(monkeypatch):
-    monkeypatch.setattr(bot, "DOWNLOAD_SLOTS", asyncio.Semaphore(2))
+    monkeypatch.setattr(preparation, "DOWNLOAD_SLOTS", asyncio.Semaphore(2))
 
     async def no_alert(context):
         pass
 
-    monkeypatch.setattr(bot, "alert_if_cookies_rejected", no_alert)
+    monkeypatch.setattr(preparation, "alert_if_cookies_rejected", no_alert)
 
 
 def run_side_by_side(count, make_call):
@@ -57,34 +57,34 @@ def run_side_by_side(count, make_call):
 
 def test_downloads_take_turns_past_the_cap(monkeypatch, tmp_path, two_slots):
     meter = ConcurrencyMeter()
-    monkeypatch.setattr(bot, "download_post", meter)
+    monkeypatch.setattr(instagram, "download_post", meter)
 
-    run_side_by_side(6, lambda: bot.download_post_in_thread("url", tmp_path, None))
+    run_side_by_side(6, lambda: preparation.download_post_in_thread("url", tmp_path, None))
 
     assert meter.peak == 2
 
 
 def test_downloads_under_the_cap_run_together(monkeypatch, tmp_path, two_slots):
     meter = ConcurrencyMeter()
-    monkeypatch.setattr(bot, "download_post", meter)
+    monkeypatch.setattr(instagram, "download_post", meter)
 
-    run_side_by_side(2, lambda: bot.download_post_in_thread("url", tmp_path, None))
+    run_side_by_side(2, lambda: preparation.download_post_in_thread("url", tmp_path, None))
 
     assert meter.peak == 2
 
 
 def test_compression_takes_the_same_slots(monkeypatch, tmp_path, two_slots):
     meter = ConcurrencyMeter()
-    monkeypatch.setattr(bot, "prepare_items_for_upload", meter)
+    monkeypatch.setattr(media, "prepare_items_for_upload", meter)
 
-    run_side_by_side(6, lambda: bot.prepare_items_in_thread([], tmp_path))
+    run_side_by_side(6, lambda: preparation.prepare_items_in_thread([], tmp_path))
 
     assert meter.peak == 2
 
 
 def test_a_burst_of_inline_queries_uploads_the_placeholder_once(monkeypatch):
-    monkeypatch.setattr(bot, "STORAGE_CHAT_ID", "-100")
-    monkeypatch.setattr(bot, "PLACEHOLDER_UPLOAD_LOCK", asyncio.Lock())
+    monkeypatch.setattr(config, "STORAGE_CHAT_ID", "-100")
+    monkeypatch.setattr(inline, "PLACEHOLDER_UPLOAD_LOCK", asyncio.Lock())
     uploads = []
 
     async def send_photo(**kwargs):
@@ -98,7 +98,7 @@ def test_a_burst_of_inline_queries_uploads_the_placeholder_once(monkeypatch):
     )
 
     async def burst():
-        return await asyncio.gather(*(bot.get_placeholder_photo_file_id(context) for _ in range(5)))
+        return await asyncio.gather(*(inline.get_placeholder_photo_file_id(context) for _ in range(5)))
 
     assert asyncio.run(burst()) == ["placeholder"] * 5
     assert len(uploads) == 1
