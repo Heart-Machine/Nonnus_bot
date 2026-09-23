@@ -103,8 +103,15 @@ COOKIE_RETRY_SECONDS = 60 * 60
 COOKIE_ALERT_INTERVAL_SECONDS = 12 * 60 * 60
 
 
+# How many requests in a row Instagram has to turn the cookies down on before
+# they are set aside. One can be a timeout or a rate limit on the logged-in
+# route that happens to clear by the logged-out attempt right after; a dead
+# session fails every time, so it is caught by the second request anyway.
+COOKIE_REJECTIONS_TO_SUSPEND = 2
+
+
 COOKIE_ALERT_TEXT = (
-    "Instagram не принял cookies бота: публикацию удалось скачать только без входа.\n\n"
+    "Instagram дважды подряд не принял cookies бота: публикации удалось скачать только без входа.\n\n"
     "Пока бот скачивает без cookies. Публичные посты работают, а то, что требует входа, - нет.\n\n"
     "Выгрузи свежие cookies аккаунта бота, обнови INSTAGRAM_COOKIES_B64 в окружении production "
     "и запусти деплой вручную.\n\n"
@@ -126,21 +133,30 @@ class InstagramSession:
     that fails both ways says the post was - private or deleted - and raises no
     alarm. That also keeps this off yt-dlp's error wording, which is nothing to
     build on: a dead session currently surfaces as a JSON parse error rather
-    than as anything about logging in."""
+    than as anything about logging in.
+
+    Being indirect, it cannot tell a dead session from a one-off failure on
+    the logged-in route - a timeout, a rate limit - that has cleared by the
+    logged-out try. So one rejection is not enough: the cookies are set aside,
+    and the owner alerted, only after `rejections_to_suspend` requests in a
+    row turned them down. Any request they worked for starts the count over."""
 
     def __init__(
         self,
         cookies_file: str,
         retry_after: float = COOKIE_RETRY_SECONDS,
         alert_every: float = COOKIE_ALERT_INTERVAL_SECONDS,
+        rejections_to_suspend: int = COOKIE_REJECTIONS_TO_SUSPEND,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self.cookies_file = cookies_file
         self.retry_after = retry_after
         self.alert_every = alert_every
+        self.rejections_to_suspend = rejections_to_suspend
         self._clock = clock
         # Downloads run in worker threads, several at a time.
         self._lock = threading.Lock()
+        self._rejections_in_a_row = 0
         self._suspended_until = float("-inf")
         self._last_alert = float("-inf")
         self._alert_pending = False
@@ -149,13 +165,27 @@ class InstagramSession:
         with self._lock:
             return bool(self.cookies_file) and self._clock() >= self._suspended_until
 
-    def mark_rejected(self) -> None:
+    def mark_accepted(self) -> None:
+        with self._lock:
+            self._rejections_in_a_row = 0
+
+    def mark_rejected(self) -> bool:
+        """Count a request the cookies were turned down on. Returns whether
+        that made enough in a row to set them aside."""
         now = self._clock()
         with self._lock:
+            self._rejections_in_a_row += 1
+            if self._rejections_in_a_row < self.rejections_to_suspend:
+                return False
+
+            # Once they are tried again, it takes a full count of rejections
+            # to set them aside again.
+            self._rejections_in_a_row = 0
             self._suspended_until = now + self.retry_after
             if now - self._last_alert >= self.alert_every:
                 self._last_alert = now
                 self._alert_pending = True
+            return True
 
     def take_alert(self) -> bool:
         with self._lock:
@@ -226,7 +256,7 @@ def with_cookie_fallback(url: str, attempt: Callable[[bool], T]) -> Tuple[T, boo
         return attempt(False), False
 
     try:
-        return attempt(True), True
+        result = attempt(True)
     except YoutubeDLError as cookie_error:
         try:
             result = attempt(False)
@@ -234,14 +264,24 @@ def with_cookie_fallback(url: str, attempt: Callable[[bool], T]) -> Tuple[T, boo
             # Failed both ways: the post is the problem - private, deleted -
             # not the session. Report what the primary route said.
             raise cookie_error from None
+    else:
+        INSTAGRAM_SESSION.mark_accepted()
+        return result, True
 
-    logger.warning(
-        "Instagram turned down the session cookies for %s but served it without them; "
-        "going without cookies for %d min. Refresh INSTAGRAM_COOKIES_B64.",
-        url,
-        COOKIE_RETRY_SECONDS // 60,
-    )
-    INSTAGRAM_SESSION.mark_rejected()
+    if INSTAGRAM_SESSION.mark_rejected():
+        logger.warning(
+            "Instagram turned down the session cookies for %s but served it without them, "
+            "%d requests in a row now; going without cookies for %d min. Refresh INSTAGRAM_COOKIES_B64.",
+            url,
+            INSTAGRAM_SESSION.rejections_to_suspend,
+            COOKIE_RETRY_SECONDS // 60,
+        )
+    else:
+        logger.warning(
+            "Instagram turned down the session cookies for %s but served it without them; "
+            "keeping them for now, in case it was a one-off",
+            url,
+        )
     return result, False
 
 
@@ -448,7 +488,7 @@ def download_post(url: str, download_dir: Path) -> Tuple[list[media.MediaItem], 
     url = links.normalize_post_url(url)
 
     try:
-        info, _ = probe_post_with_fallback(url, download_dir)
+        info, probe_used_cookies = probe_post_with_fallback(url, download_dir)
     except ExtractorError as error:
         if "no video formats" in str(error).lower():
             raise NoMediaInPostError("This Instagram post has no downloadable media.") from error
@@ -461,13 +501,21 @@ def download_post(url: str, download_dir: Path) -> Tuple[list[media.MediaItem], 
     video_indices = [index for index, entry in enumerate(entries) if entry_has_video(entry)]
     video_paths: dict[int, Path] = {}
     if video_indices:
-        # If the probe had to fall back, the cookies are suspended by now and
-        # this goes without them straight away; otherwise it gets its own
-        # fallback, for the reason given in with_cookie_fallback.
-        video_paths, _ = with_cookie_fallback(
-            url,
-            lambda use_cookies: download_post_videos(url, download_dir, entries, video_indices, use_cookies),
-        )
+        if probe_used_cookies:
+            # The probe came through on the cookies, but this pass gets its
+            # own fallback all the same, for the reason given in
+            # with_cookie_fallback.
+            video_paths, _ = with_cookie_fallback(
+                url,
+                lambda use_cookies: download_post_videos(url, download_dir, entries, video_indices, use_cookies),
+            )
+        else:
+            # The post was served logged-out - the cookies turned down, set
+            # aside, or never there - so its videos are fetched the same way,
+            # not with cookies that just failed on it. Retrying them here would
+            # only cost a request and count against them a second time for
+            # what is one post.
+            video_paths = download_post_videos(url, download_dir, entries, video_indices, use_cookies=False)
 
     items: list[media.MediaItem] = []
     missing: list[int] = []

@@ -315,7 +315,7 @@ def test_download_post_keeps_mixed_carousel_order(monkeypatch, stub_downloads):
             "webpage_url": "https://www.instagram.com/p/ABC123/",
         },
     )
-    monkeypatch.setattr(instagram, "download_post_videos", lambda *args: {1: video_path})
+    monkeypatch.setattr(instagram, "download_post_videos", lambda *args, **kwargs: {1: video_path})
 
     items, caption = instagram.download_post("https://www.instagram.com/p/ABC123/", work_dir)
 
@@ -335,7 +335,7 @@ def test_download_post_warns_about_missing_audio_only_for_a_lone_video(monkeypat
         "probe_post",
         lambda url, download_dir, use_cookies=True: {**video_entry("b"), "channel": "someone"},
     )
-    monkeypatch.setattr(instagram, "download_post_videos", lambda *args: {0: video_path})
+    monkeypatch.setattr(instagram, "download_post_videos", lambda *args, **kwargs: {0: video_path})
     monkeypatch.setattr(
         media,
         "add_audio_warning_if_needed",
@@ -360,7 +360,7 @@ def test_download_post_skips_the_audio_warning_for_a_carousel(monkeypatch, stub_
         "probe_post",
         lambda url, download_dir, use_cookies=True: {"entries": [video_entry("b"), photo_entry("c")]},
     )
-    monkeypatch.setattr(instagram, "download_post_videos", lambda *args: {0: video_path})
+    monkeypatch.setattr(instagram, "download_post_videos", lambda *args, **kwargs: {0: video_path})
     monkeypatch.setattr(
         media,
         "add_audio_warning_if_needed",
