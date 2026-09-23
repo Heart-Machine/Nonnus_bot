@@ -202,7 +202,29 @@ def ensure_h264_video(video_path: Path, work_dir: Path) -> Path:
     return output_path if output_path.exists() else video_path
 
 
+def compression_scale_filter(size: int) -> str:
+    """Fit the frame in a size x size box - so the number bounds the long
+    side, 1280 being 720x1280 for a vertical Reel and 1280x720 for a
+    landscape video alike - and never enlarge it: the box shrinks to the
+    frame where the frame is smaller. Sides come out even, which libx264
+    needs for yuv420p."""
+    return (
+        f"scale=w='min({size},iw)':h='min({size},ih)'"
+        ":force_original_aspect_ratio=decrease:force_divisible_by=2"
+    )
+
+
 def compress_video(video_path: Path, work_dir: Path) -> Optional[Path]:
+    """Re-encode a video to fit VIDEO_COMPRESSION_TARGET_BYTES.
+
+    What decides the size is the bitrate times the duration; the resolution
+    only decides how good that bitrate looks. So the bitrate is worked out
+    from the target, kept at or above VIDEO_COMPRESSION_MIN_VIDEO_KBPS, and a
+    video that would not fit Telegram's limit even at that floor is not
+    encoded at all: three full encodes of a long video, fifteen minutes
+    apiece at most, would only end in the same "too large". Each later step
+    both lowers the resolution and cuts the bitrate by as much as the last
+    try overshot, down to the floor."""
     if not config.ENABLE_VIDEO_COMPRESSION:
         return None
 
@@ -210,19 +232,33 @@ def compress_video(video_path: Path, work_dir: Path) -> Optional[Path]:
     if not duration:
         return None
 
-    target_bits_per_second = int((config.VIDEO_COMPRESSION_TARGET_BYTES * 8 * 0.92) / duration)
-    audio_kbps = min(config.VIDEO_COMPRESSION_AUDIO_KBPS, max(48, target_bits_per_second // 1000 // 5))
-    video_kbps = max((target_bits_per_second // 1000) - audio_kbps, config.VIDEO_COMPRESSION_MIN_VIDEO_KBPS)
+    floor_kbps = config.VIDEO_COMPRESSION_MIN_VIDEO_KBPS
+    target_kbps = int((config.VIDEO_COMPRESSION_TARGET_BYTES * 8 * 0.92) / duration) // 1000
+    audio_kbps = min(config.VIDEO_COMPRESSION_AUDIO_KBPS, max(48, target_kbps // 5))
+    video_kbps = max(target_kbps - audio_kbps, floor_kbps)
 
-    for height in config.VIDEO_COMPRESSION_HEIGHTS:
-        output_path = work_dir / f"{video_path.stem}.compressed-{height}p.mp4"
+    size_at_floor = (floor_kbps + audio_kbps) * 1000 / 8 * duration
+    if size_at_floor > config.MAX_FILE_SIZE_BYTES:
+        logger.warning(
+            "%s: %.0f s would be about %.0f MB even at the %d kbps floor, over the %d MB limit; not compressing",
+            video_path.name,
+            duration,
+            size_at_floor / (1024 * 1024),
+            floor_kbps,
+            config.MAX_FILE_SIZE_MB,
+        )
+        return None
+
+    smallest: Optional[Path] = None
+    for size in config.VIDEO_COMPRESSION_HEIGHTS:
+        output_path = work_dir / f"{video_path.stem}.compressed-{size}p.mp4"
         command = [
             "ffmpeg",
             "-y",
             "-i",
             str(video_path),
             "-vf",
-            f"scale=-2:{height}:force_original_aspect_ratio=decrease",
+            compression_scale_filter(size),
             "-c:v",
             "libx264",
             "-preset",
@@ -233,6 +269,10 @@ def compress_video(video_path: Path, work_dir: Path) -> Optional[Path]:
             f"{video_kbps}k",
             "-bufsize",
             f"{video_kbps * 2}k",
+            # A 10-bit or 4:4:4 source would otherwise come out in a profile
+            # Telegram on iOS cannot play, as in ensure_h264_video.
+            "-pix_fmt",
+            "yuv420p",
             "-c:a",
             "aac",
             "-b:a",
@@ -248,17 +288,29 @@ def compress_video(video_path: Path, work_dir: Path) -> Optional[Path]:
             logger.exception("ffmpeg is not installed")
             return None
         except subprocess.SubprocessError:
-            logger.exception("Failed to compress video to %sp", height)
+            logger.exception("Failed to compress video to %sp", size)
             continue
 
-        if output_path.exists() and output_path.stat().st_size <= config.VIDEO_COMPRESSION_TARGET_BYTES:
+        if not output_path.exists():
+            continue
+
+        output_size = output_path.stat().st_size
+        if output_size <= config.VIDEO_COMPRESSION_TARGET_BYTES:
             return output_path
 
-    candidates = sorted(
-        work_dir.glob(f"{video_path.stem}.compressed-*.mp4"),
-        key=lambda item: item.stat().st_size,
-    )
-    return candidates[0] if candidates else None
+        if smallest is None or output_size < smallest.stat().st_size:
+            smallest = output_path
+
+        # Overshot: aim the next try lower by the same proportion, with a
+        # little to spare, but not below the floor - and once at the floor,
+        # a smaller frame at the same bitrate would come out the same size.
+        next_kbps = max(int(video_kbps * config.VIDEO_COMPRESSION_TARGET_BYTES / output_size * 0.95), floor_kbps)
+        if next_kbps >= video_kbps:
+            logger.warning("%s: still %d bytes at %sp and already at the bitrate floor", video_path.name, output_size, size)
+            break
+        video_kbps = next_kbps
+
+    return smallest
 
 
 def prepare_video_for_upload(video_path: Path, work_dir: Path) -> Tuple[Path, bool]:
