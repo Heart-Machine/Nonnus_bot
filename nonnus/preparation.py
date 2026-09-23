@@ -5,13 +5,14 @@ import logging
 import asyncio
 import shutil
 import tempfile
+import weakref
 from pathlib import Path
-from typing import Any, Tuple
+from typing import Any, Optional, Tuple
 
 from telegram.error import TelegramError
 from telegram.ext import ContextTypes
 
-from nonnus import config, links, media, instagram, cache, delivery
+from nonnus import config, links, media, instagram, cache, delivery, progress
 
 
 logger = logging.getLogger(__name__)
@@ -44,8 +45,12 @@ async def download_post_in_thread(
     should hear about the cookies even when the post then fails for some
     other reason."""
     try:
-        async with DOWNLOAD_SLOTS:
+        await take_slot_reporting_the_wait()
+        try:
+            progress.report(progress.DOWNLOADING)
             return await asyncio.to_thread(instagram.download_post, url, download_dir)
+        finally:
+            DOWNLOAD_SLOTS.release()
     finally:
         await alert_if_cookies_rejected(context)
 
@@ -53,11 +58,37 @@ async def download_post_in_thread(
 async def prepare_items_in_thread(items: list[media.MediaItem], work_dir: Path) -> Tuple[list[media.MediaItem], bool]:
     """prepare_items_for_upload off the event loop, in one of the same slots
     downloads take: compressing a video is ffmpeg at full tilt."""
-    async with DOWNLOAD_SLOTS:
+    await take_slot_reporting_the_wait()
+    try:
+        if config.ENABLE_VIDEO_COMPRESSION and any(
+            item.is_video and item.path.stat().st_size > config.MAX_FILE_SIZE_BYTES for item in items
+        ):
+            progress.report(progress.COMPRESSING)
         return await asyncio.to_thread(media.prepare_items_for_upload, items, work_dir)
+    finally:
+        DOWNLOAD_SLOTS.release()
 
 
-async def prepare_inline_post(url: str, context: ContextTypes.DEFAULT_TYPE) -> dict[str, Any]:
+async def take_slot_reporting_the_wait() -> None:
+    """Acquire a download slot, saying so first when there is a wait: with
+    every slot busy a request can sit here for minutes, and without a word
+    it would look like the bot hung."""
+    if DOWNLOAD_SLOTS.locked():
+        progress.report(progress.QUEUED)
+    await DOWNLOAD_SLOTS.acquire()
+
+
+async def prepare_inline_post(
+    url: str,
+    context: ContextTypes.DEFAULT_TYPE,
+    tracker: Optional[progress.Progress] = None,
+) -> dict[str, Any]:
+    # Stages reported from here on, the worker threads included, go to this
+    # preparation's tracker. The variable is set inside this task's own
+    # context, so it never leaks into anyone else's.
+    if tracker is not None:
+        progress.CURRENT.set(tracker)
+
     cached_result = cache.get_cached_inline_result(url)
     if cached_result:
         return cached_result
@@ -69,6 +100,7 @@ async def prepare_inline_post(url: str, context: ContextTypes.DEFAULT_TYPE) -> d
         caption = media.add_compression_note_if_needed(caption, compressed)
         media.ensure_items_fit_telegram(items)
 
+        progress.report(progress.UPLOADING)
         cached_result = {
             "caption": caption,
             "title": delivery.title_from_caption(caption),
@@ -78,6 +110,16 @@ async def prepare_inline_post(url: str, context: ContextTypes.DEFAULT_TYPE) -> d
         return cached_result
     finally:
         shutil.rmtree(temp_dir, ignore_errors=True)
+
+
+# The progress of each running preparation, by its task. Weak, so a task's
+# tracker goes away with the task.
+TRACKERS: "weakref.WeakKeyDictionary[asyncio.Task, progress.Progress]" = weakref.WeakKeyDictionary()
+
+
+def progress_of(task: asyncio.Task) -> Optional[progress.Progress]:
+    """The tracker of a preparation task, to follow what it is doing."""
+    return TRACKERS.get(task)
 
 
 # How long a failed preparation keeps answering inline queries for its post.
@@ -107,7 +149,9 @@ def get_or_create_prepare_task(
     if task is not None and (not task.done() or reuse_failure):
         return task
 
-    task = context.application.create_task(prepare_inline_post(url, context))
+    tracker = progress.Progress(asyncio.get_running_loop())
+    task = context.application.create_task(prepare_inline_post(url, context, tracker))
+    TRACKERS[task] = tracker
     inline_tasks[cache_key] = task
 
     def forget_task(key: str = cache_key, done_task: asyncio.Task = task) -> None:

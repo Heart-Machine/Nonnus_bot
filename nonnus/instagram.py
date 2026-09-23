@@ -22,7 +22,7 @@ from urllib.parse import parse_qs, urlparse
 from yt_dlp import YoutubeDL
 from yt_dlp.utils import ExtractorError, YoutubeDLError
 
-from nonnus import config, links, media
+from nonnus import config, links, media, progress
 
 
 logger = logging.getLogger(__name__)
@@ -498,6 +498,8 @@ def download_post(url: str, download_dir: Path) -> Tuple[list[media.MediaItem], 
     if not entries:
         raise NoMediaInPostError("This Instagram post has no downloadable media.")
 
+    total = len(entries)
+    progress.report(progress.DOWNLOADING, 0, total)
     video_indices = [index for index, entry in enumerate(entries) if entry_has_video(entry)]
     video_paths: dict[int, Path] = {}
     if video_indices:
@@ -517,6 +519,10 @@ def download_post(url: str, download_dir: Path) -> Tuple[list[media.MediaItem], 
             # what is one post.
             video_paths = download_post_videos(url, download_dir, entries, video_indices, use_cookies=False)
 
+    # The videos come down in one yt-dlp run, the photos one by one after it,
+    # so that is how the count moves.
+    done = len(video_paths)
+    progress.report(progress.DOWNLOADING, done, total)
     items: list[media.MediaItem] = []
     missing: list[int] = []
     for index, entry in enumerate(entries):
@@ -535,6 +541,8 @@ def download_post(url: str, download_dir: Path) -> Tuple[list[media.MediaItem], 
             continue
 
         items.append(media.MediaItem(media.prepare_photo_for_upload(photo_path, download_dir), "photo"))
+        done += 1
+        progress.report(progress.DOWNLOADING, done, total)
 
     if missing:
         positions = ", ".join(str(index + 1) for index in missing)
