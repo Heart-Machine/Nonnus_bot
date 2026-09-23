@@ -17,6 +17,12 @@ from nonnus import config, links, media, instagram, cache, delivery, preparation
 logger = logging.getLogger(__name__)
 
 
+INCOMPLETE_POST_TEXT = (
+    "Не получилось скачать публикацию целиком: часть файлов не загрузилась. "
+    "Попробуй ещё раз чуть позже."
+)
+
+
 async def is_message_addressed_to_bot(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
     message = update.message
     if message is None:
@@ -114,6 +120,10 @@ async def deliver_post(message, url: str, context: ContextTypes.DEFAULT_TYPE) ->
                 "В этой публикации нет ни видео, ни фото, которые я могу скачать."
             )
             return
+        except instagram.IncompletePostError:
+            logger.exception("Could not fetch all of %s", url)
+            await status_message.edit_text(INCOMPLETE_POST_TEXT)
+            return
         except media.MediaTooLargeError:
             logger.exception("Media too large for %s", url)
             await status_message.edit_text(
@@ -151,6 +161,10 @@ async def deliver_post(message, url: str, context: ContextTypes.DEFAULT_TYPE) ->
             await status_message.edit_text(
                 "В этой публикации нет ни видео, ни фото, которые я могу скачать."
             )
+            return
+        except instagram.IncompletePostError:
+            logger.exception("Could not fetch all of %s", url)
+            await status_message.edit_text(INCOMPLETE_POST_TEXT)
             return
         except Exception:
             logger.exception("Failed to download %s", url)
