@@ -102,6 +102,16 @@ UPLOAD_TIMEOUTS: dict[str, Any] = {
     "connect_timeout": 30,
     "pool_timeout": 30,
 }
+# Updates are handled side by side, so one user's post downloading no longer
+# holds up everyone else. What still takes turns is the heavy part - fetching
+# a post with yt-dlp and compressing its videos with ffmpeg: without a cap a
+# burst of links would start that many of each at once, more than a small
+# server has CPU and memory for, and a quick way to get the cookies' account
+# rate-limited. A request past the cap waits for a slot; cached posts, inline
+# answers and other messages go on meanwhile.
+MAX_PARALLEL_DOWNLOADS = max(1, int(os.getenv("MAX_PARALLEL_DOWNLOADS", "3")))
+DOWNLOAD_SLOTS = asyncio.Semaphore(MAX_PARALLEL_DOWNLOADS)
+PLACEHOLDER_UPLOAD_LOCK = asyncio.Lock()
 # Bumped to 5: captions now start with "Пост" or "Рилс", and entries cached
 # before that would keep the old caption for as long as they stay cached.
 # Bumped to 4: a cache entry now holds a list of media items instead of one
@@ -483,21 +493,29 @@ async def get_placeholder_photo_file_id(context: ContextTypes.DEFAULT_TYPE) -> O
     if not STORAGE_CHAT_ID:
         return None
 
-    try:
-        sent_message = await context.bot.send_photo(
-            chat_id=parse_storage_chat_id(),
-            photo=INLINE_PLACEHOLDER_IMAGE_BYTES,
-        )
-    except TelegramError:
-        logger.exception("Failed to upload inline placeholder photo")
-        return None
+    # Inline queries arrive on every keystroke and are handled side by side,
+    # so a burst of them could find no file_id and each upload the image.
+    # The first one uploads; the rest wait and reuse its file_id.
+    async with PLACEHOLDER_UPLOAD_LOCK:
+        file_id = context.application.bot_data.get("placeholder_photo_file_id")
+        if file_id:
+            return file_id
 
-    if not sent_message.photo:
-        return None
+        try:
+            sent_message = await context.bot.send_photo(
+                chat_id=parse_storage_chat_id(),
+                photo=INLINE_PLACEHOLDER_IMAGE_BYTES,
+            )
+        except TelegramError:
+            logger.exception("Failed to upload inline placeholder photo")
+            return None
 
-    file_id = sent_message.photo[-1].file_id
-    context.application.bot_data["placeholder_photo_file_id"] = file_id
-    return file_id
+        if not sent_message.photo:
+            return None
+
+        file_id = sent_message.photo[-1].file_id
+        context.application.bot_data["placeholder_photo_file_id"] = file_id
+        return file_id
 
 
 def build_inline_placeholder_result(url: str, photo_file_id: str) -> InlineQueryResultCachedPhoto:
@@ -1505,9 +1523,17 @@ async def download_post_in_thread(
     should hear about the cookies even when the post then fails for some
     other reason."""
     try:
-        return await asyncio.to_thread(download_post, url, download_dir)
+        async with DOWNLOAD_SLOTS:
+            return await asyncio.to_thread(download_post, url, download_dir)
     finally:
         await alert_if_cookies_rejected(context)
+
+
+async def prepare_items_in_thread(items: list[MediaItem], work_dir: Path) -> Tuple[list[MediaItem], bool]:
+    """prepare_items_for_upload off the event loop, in one of the same slots
+    downloads take: compressing a video is ffmpeg at full tilt."""
+    async with DOWNLOAD_SLOTS:
+        return await asyncio.to_thread(prepare_items_for_upload, items, work_dir)
 
 
 async def prepare_inline_post(url: str, context: ContextTypes.DEFAULT_TYPE) -> dict[str, Any]:
@@ -1518,7 +1544,7 @@ async def prepare_inline_post(url: str, context: ContextTypes.DEFAULT_TYPE) -> d
     temp_dir = Path(tempfile.mkdtemp(prefix="ig_inline_"))
     try:
         items, caption = await download_post_in_thread(url, temp_dir, context)
-        items, compressed = await asyncio.to_thread(prepare_items_for_upload, items, temp_dir)
+        items, compressed = await prepare_items_in_thread(items, temp_dir)
         caption = add_compression_note_if_needed(caption, compressed)
         ensure_items_fit_telegram(items)
 
@@ -1952,7 +1978,7 @@ async def deliver_post(message, url: str, context: ContextTypes.DEFAULT_TYPE) ->
         if oversized_video and ENABLE_VIDEO_COMPRESSION:
             await status_message.edit_text("Видео большое, сжимаю перед отправкой...")
 
-        items, compressed = await asyncio.to_thread(prepare_items_for_upload, items, temp_dir)
+        items, compressed = await prepare_items_in_thread(items, temp_dir)
         caption = add_compression_note_if_needed(caption, compressed)
 
         try:
@@ -1989,17 +2015,17 @@ async def deliver_post(message, url: str, context: ContextTypes.DEFAULT_TYPE) ->
         shutil.rmtree(temp_dir, ignore_errors=True)
 
 
-def main() -> None:
-    if not BOT_TOKEN:
-        raise RuntimeError("Set BOT_TOKEN in .env or environment variables")
-
+def build_application(token: str) -> Application:
     app = (
         Application.builder()
-        .token(BOT_TOKEN)
+        .token(token)
         .read_timeout(UPLOAD_TIMEOUT_SECONDS)
         .write_timeout(UPLOAD_TIMEOUT_SECONDS)
         .connect_timeout(30)
         .pool_timeout(30)
+        # Without this the library handles one update at a time, and every
+        # user waits while anyone's post downloads.
+        .concurrent_updates(True)
         .build()
     )
     app.add_handler(CommandHandler("start", start))
@@ -2007,7 +2033,14 @@ def main() -> None:
     app.add_handler(InlineQueryHandler(handle_inline_query))
     app.add_handler(ChosenInlineResultHandler(handle_chosen_inline_result))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    app.run_polling(allowed_updates=Update.ALL_TYPES)
+    return app
+
+
+def main() -> None:
+    if not BOT_TOKEN:
+        raise RuntimeError("Set BOT_TOKEN in .env or environment variables")
+
+    build_application(BOT_TOKEN).run_polling(allowed_updates=Update.ALL_TYPES)
 
 
 if __name__ == "__main__":
