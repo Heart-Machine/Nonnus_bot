@@ -37,6 +37,12 @@ def session(monkeypatch, clock):
     return instance
 
 
+def reject_in_a_row(session):
+    """As many rejections in a row as it takes to set the cookies aside."""
+    for _ in range(session.rejections_to_suspend):
+        session.mark_rejected()
+
+
 # --- the session state ----------------------------------------------------
 
 
@@ -48,8 +54,30 @@ def test_no_cookie_file_means_no_cookies(clock):
     assert instagram.InstagramSession("", clock=clock).use_cookies() is False
 
 
-def test_a_rejection_suspends_the_cookies_for_a_while(session, clock):
+def test_it_takes_two_rejections_in_a_row(session):
+    assert session.rejections_to_suspend == 2
+
+    assert session.mark_rejected() is False
+    assert session.use_cookies() is True
+    assert session.take_alert() is False
+
+    assert session.mark_rejected() is True
+    assert session.use_cookies() is False
+
+
+def test_a_request_the_cookies_worked_for_starts_the_count_over(session):
+    # A one-off failure, then the cookies work, then another one-off: two
+    # rejections, but not in a row.
     session.mark_rejected()
+    session.mark_accepted()
+    session.mark_rejected()
+
+    assert session.use_cookies() is True
+    assert session.take_alert() is False
+
+
+def test_rejections_in_a_row_suspend_the_cookies_for_a_while(session, clock):
+    reject_in_a_row(session)
     assert session.use_cookies() is False
 
     clock.now += 59
@@ -59,23 +87,32 @@ def test_a_rejection_suspends_the_cookies_for_a_while(session, clock):
     assert session.use_cookies() is True
 
 
-def test_a_rejection_raises_the_alert_exactly_once(session):
+def test_once_tried_again_it_takes_a_full_count_to_set_them_aside_again(session, clock):
+    reject_in_a_row(session)
+    clock.now += 60
+
     session.mark_rejected()
+
+    assert session.use_cookies() is True
+
+
+def test_setting_the_cookies_aside_raises_the_alert_exactly_once(session):
+    reject_in_a_row(session)
 
     assert session.take_alert() is True
     assert session.take_alert() is False
 
 
 def test_alerts_are_rate_limited(session, clock):
-    session.mark_rejected()
+    reject_in_a_row(session)
     session.take_alert()
 
     clock.now += 300
-    session.mark_rejected()
+    reject_in_a_row(session)
     assert session.take_alert() is False
 
     clock.now += 300
-    session.mark_rejected()
+    reject_in_a_row(session)
     assert session.take_alert() is True
 
 
@@ -106,7 +143,7 @@ def test_working_cookies_are_used_and_nothing_else_is_tried(monkeypatch, session
     assert session.take_alert() is False
 
 
-def test_turned_down_cookies_fall_back_and_raise_the_alert(monkeypatch, session, tmp_path):
+def test_turned_down_cookies_fall_back_but_are_kept_after_one_rejection(monkeypatch, session, tmp_path):
     # A dead session surfaces from yt-dlp as a JSON parse error, not as
     # anything about logging in - which is why nothing keys off the wording.
     tried = fake_probe(
@@ -117,8 +154,45 @@ def test_turned_down_cookies_fall_back_and_raise_the_alert(monkeypatch, session,
 
     assert instagram.probe_post_with_fallback("https://x/", tmp_path) == (INFO, False)
     assert tried == ["cookies", "anonymous"]
+    # It may have been a timeout or a rate limit that cleared in between.
+    assert session.use_cookies() is True
+    assert session.take_alert() is False
+
+
+def test_cookies_turned_down_on_two_requests_in_a_row_are_set_aside_with_an_alert(monkeypatch, session, tmp_path):
+    tried = fake_probe(
+        monkeypatch,
+        with_cookies=DownloadError("ERROR: [Instagram] X: Failed to parse JSON"),
+        without_cookies=INFO,
+    )
+
+    for _ in range(3):
+        assert instagram.probe_post_with_fallback("https://x/", tmp_path) == (INFO, False)
+
+    # The third request no longer tries the cookies at all.
+    assert tried == ["cookies", "anonymous", "cookies", "anonymous", "anonymous"]
     assert session.use_cookies() is False
     assert session.take_alert() is True
+
+
+def test_cookies_that_work_in_between_are_not_set_aside(monkeypatch, session, tmp_path):
+    outcomes = iter([DownloadError("timed out"), INFO, DownloadError("rate limited")])
+
+    def probe_post(url, download_dir, use_cookies=True):
+        if not use_cookies:
+            return INFO
+        outcome = next(outcomes)
+        if isinstance(outcome, BaseException):
+            raise outcome
+        return outcome
+
+    monkeypatch.setattr(instagram, "probe_post", probe_post)
+
+    for _ in range(3):
+        instagram.probe_post_with_fallback("https://x/", tmp_path)
+
+    assert session.use_cookies() is True
+    assert session.take_alert() is False
 
 
 def test_a_post_failing_both_ways_is_blamed_on_the_post(monkeypatch, session, tmp_path):
@@ -136,7 +210,7 @@ def test_a_post_failing_both_ways_is_blamed_on_the_post(monkeypatch, session, tm
 
 
 def test_suspended_cookies_are_not_even_tried(monkeypatch, session, tmp_path):
-    session.mark_rejected()
+    reject_in_a_row(session)
     session.take_alert()
     tried = fake_probe(monkeypatch, with_cookies=AssertionError("not reached"), without_cookies=INFO)
 
@@ -153,8 +227,9 @@ def test_without_a_cookie_file_only_the_logged_out_route_is_tried(monkeypatch, c
 
 
 def test_the_video_pass_takes_the_route_the_probe_took(monkeypatch, session, tmp_path):
-    # Probing fell back to the logged-out route; downloading the videos with
-    # the dead cookies again would fail all over.
+    # Probing fell back to the logged-out route. The cookies are still in use
+    # after one rejection, but not for this post: trying them again on its
+    # videos would only fail again, and count a second time for one post.
     fake_probe(
         monkeypatch,
         with_cookies=DownloadError("dead session"),
@@ -175,6 +250,7 @@ def test_the_video_pass_takes_the_route_the_probe_took(monkeypatch, session, tmp
     instagram.download_post("https://www.instagram.com/p/ABC123/", tmp_path)
 
     assert routes == [False]
+    assert session.use_cookies() is True
 
 
 def test_the_video_pass_falls_back_on_its_own(monkeypatch, session, tmp_path):
@@ -204,7 +280,10 @@ def test_the_video_pass_falls_back_on_its_own(monkeypatch, session, tmp_path):
 
     assert routes == [True, False]
     assert [item.kind for item in items] == ["video"]
-    assert session.take_alert() is True
+    # The probe worked on the cookies and the video pass did not: one
+    # rejection, not two in a row.
+    assert session.use_cookies() is True
+    assert session.take_alert() is False
 
 
 # --- yt-dlp options -------------------------------------------------------
@@ -242,7 +321,7 @@ def test_the_alert_goes_to_the_storage_chat_once(monkeypatch, session):
     telegram = RecordingBot()
     context = SimpleNamespace(bot=telegram)
 
-    session.mark_rejected()
+    reject_in_a_row(session)
     asyncio.run(preparation.alert_if_cookies_rejected(context))
     asyncio.run(preparation.alert_if_cookies_rejected(context))
 
@@ -268,7 +347,7 @@ def test_the_alert_goes_out_even_when_the_post_then_fails(monkeypatch, session):
     telegram = RecordingBot()
 
     def download_post(url, download_dir):
-        instagram.INSTAGRAM_SESSION.mark_rejected()
+        reject_in_a_row(instagram.INSTAGRAM_SESSION)
         raise instagram.NoMediaInPostError("nothing to download")
 
     monkeypatch.setattr(instagram, "download_post", download_post)
