@@ -39,6 +39,12 @@ UPLOAD_FAILED_TEXT = (
 UNEXPECTED_ERROR_TEXT = "Что-то пошло не так. Попробуй ещё раз чуть позже."
 
 
+SHARE_LINK_UNRESOLVED_TEXT = (
+    "Не получилось понять, на какой пост ведёт эта ссылка: Instagram не ответил. "
+    "Пришли обычную ссылку на пост - в Instagram это «Копировать ссылку»."
+)
+
+
 DOWNLOADING_TEXT = "Скачиваю публикацию..."
 
 
@@ -195,7 +201,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         )
         return
 
-    await deliver_post(message, url, context)
+    post_url = await preparation.resolve_link(url)
+    if post_url is None:
+        await message.reply_text(SHARE_LINK_UNRESOLVED_TEXT, disable_web_page_preview=True)
+        return
+
+    await deliver_post(message, post_url, context)
 
 
 async def deliver_post(message, url: str, context: ContextTypes.DEFAULT_TYPE) -> None:

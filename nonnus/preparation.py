@@ -6,7 +6,9 @@ import asyncio
 import shutil
 import tempfile
 import weakref
+from collections import OrderedDict
 from pathlib import Path
+from urllib.parse import urlparse
 from typing import Any, Optional, Tuple
 
 from telegram.error import TelegramError
@@ -19,6 +21,34 @@ logger = logging.getLogger(__name__)
 
 
 DOWNLOAD_SLOTS = asyncio.Semaphore(config.MAX_PARALLEL_DOWNLOADS)
+
+
+# Share links already resolved, by their path. The client sends an inline
+# query on every keystroke, and the post behind a share link does not
+# change, so Instagram is asked once. Bounded, oldest first out.
+RESOLVED_SHARE_LINKS: "OrderedDict[str, str]" = OrderedDict()
+RESOLVED_SHARE_LINKS_LIMIT = 1000
+
+
+async def resolve_link(url: str) -> Optional[str]:
+    """The link to work with: `url` itself, or for a share link the post it
+    stands for - None if Instagram would not say. Everything downstream -
+    the cache key, the deep link, yt-dlp - needs the real shortcode, which a
+    share link does not carry."""
+    if not links.is_share_link(url):
+        return url
+
+    key = urlparse(url).path.rstrip("/")
+    if key in RESOLVED_SHARE_LINKS:
+        RESOLVED_SHARE_LINKS.move_to_end(key)
+        return RESOLVED_SHARE_LINKS[key]
+
+    post = await asyncio.to_thread(instagram.resolve_share_link, url)
+    if post is not None:
+        RESOLVED_SHARE_LINKS[key] = post
+        while len(RESOLVED_SHARE_LINKS) > RESOLVED_SHARE_LINKS_LIMIT:
+            RESOLVED_SHARE_LINKS.popitem(last=False)
+    return post
 
 
 async def alert_if_cookies_rejected(context: ContextTypes.DEFAULT_TYPE) -> None:
