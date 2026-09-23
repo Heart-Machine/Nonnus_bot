@@ -155,6 +155,11 @@ jobs:
               # container runs as this same user, so it can still read them.
               chmod 600 cookies/instagram_cookies.txt
               COOKIES_FILE_VALUE="/app/cookies/instagram_cookies.txt"
+            else
+              # The secret was removed, so the bot runs without cookies - and
+              # the session from an earlier deploy has no reason to stay on
+              # disk. It is still a live login until Instagram closes it.
+              rm -f cookies/instagram_cookies.txt
             fi
 
             {
