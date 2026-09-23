@@ -103,6 +103,43 @@ def test_settling_cancels_a_pending_update(monkeypatch):
     assert took < 0.5
 
 
+def test_settling_does_not_swallow_a_cancellation_of_the_handler(monkeypatch):
+    # If the handler itself is cancelled while settling - at shutdown, say -
+    # that must go through, not be taken for the pending edit's own
+    # cancellation and quietly dropped.
+    monkeypatch.setattr(handlers, "STATUS_EDIT_INTERVAL_SECONDS", 0)
+
+    class SlowToCancel(RecordedMessage):
+        """A progress edit that takes a moment to wind down once cancelled;
+        the final edit goes through at once."""
+
+        async def edit_text(self, text, **kwargs):
+            if text == "error":
+                self.edits.append(text)
+                return
+            try:
+                await asyncio.sleep(3600)
+            except asyncio.CancelledError:
+                await asyncio.sleep(0.3)
+                raise
+
+    async def run():
+        status = handlers.StatusMessage(SlowToCancel(), "start")
+        status.show("1 из 3")
+        await asyncio.sleep(0.01)
+        settling = asyncio.get_running_loop().create_task(status.fail("error"))
+        await asyncio.sleep(0.05)
+        settling.cancel()
+        await asyncio.wait({settling}, timeout=2)
+        return settling
+
+    settling = asyncio.run(run())
+
+    # Swallowed, it would have gone on to the final edit as if nothing
+    # happened, and ended normally.
+    assert settling.cancelled()
+
+
 def test_a_progress_edit_that_fails_is_not_fatal():
     message = RecordedMessage(fail_edits=True)
 

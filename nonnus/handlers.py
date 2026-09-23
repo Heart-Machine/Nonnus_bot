@@ -1,7 +1,6 @@
 """Handlers for commands and for links sent to the bot directly."""
 
 import asyncio
-import contextlib
 import logging
 import re
 import shutil
@@ -115,8 +114,10 @@ class StatusMessage:
         self._settled = True
         if self._pending is not None and not self._pending.done():
             self._pending.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await self._pending
+            # gather returns the edit's own CancelledError instead of
+            # raising it, while a cancellation of this handler still goes
+            # through - suppressing CancelledError here would swallow that.
+            await asyncio.gather(self._pending, return_exceptions=True)
 
     async def fail(self, text: str) -> None:
         await self._settle()
