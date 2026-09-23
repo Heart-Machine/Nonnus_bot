@@ -26,14 +26,23 @@ updates:
   # floors in requirements.in and requirements-dev.txt to whatever happens to
   # be current, which is churn: those constraints state what the project needs,
   # not what is installed today.
+  #
+  # Daily, for yt-dlp's sake: when Instagram breaks it, the fix usually ships
+  # within a day or two, and waiting out the rest of a week meant a week of a
+  # broken bot. It comes in a pull request of its own, so it can be merged the
+  # moment it lands without waiting on anything else; the rest of the Python
+  # dependencies keep sharing one.
   - package-ecosystem: pip
     directory: /
     schedule:
-      interval: weekly
+      interval: daily
     versioning-strategy: lockfile-only
     groups:
+      yt-dlp:
+        patterns: ["yt-dlp"]
       python:
         patterns: ["*"]
+        exclude-patterns: ["yt-dlp"]
 
   # The base image is pinned by digest, so this keeps that digest moving within
   # the Python line the project is on.
