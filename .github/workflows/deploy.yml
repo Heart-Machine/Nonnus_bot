@@ -171,6 +171,9 @@ jobs:
               printf 'VIDEO_COMPRESSION_PRESET=%s\n' "$VIDEO_COMPRESSION_PRESET"
               printf 'VIDEO_COMPRESSION_MIN_VIDEO_KBPS=%s\n' "$VIDEO_COMPRESSION_MIN_VIDEO_KBPS"
               printf 'STORAGE_CHAT_ID=%s\n' "$STORAGE_CHAT_ID"
+              printf 'INLINE_CACHE_DB=%s\n' "/app/data/inline_cache.sqlite3"
+              # The JSON cache from before INLINE_CACHE_DB: its posts are
+              # carried into the database once, when the database is created.
               printf 'INLINE_CACHE_FILE=%s\n' "/app/data/inline_cache.json"
             } > .env
             chmod 600 .env

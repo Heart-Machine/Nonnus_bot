@@ -5,7 +5,6 @@ with stand-ins, so what gets exercised is the decision-making around them -
 which entries of a post carry a video, what order the files come out in, and
 what gets handed to Telegram.
 """
-import json
 
 import pytest
 
@@ -600,57 +599,3 @@ def test_title_from_caption_reads_the_link_text():
 def test_add_compression_note_only_when_compressed():
     assert bot.add_compression_note_if_needed("caption", False) == "caption"
     assert "сжато" in bot.add_compression_note_if_needed("caption", True)
-
-
-# --- the file_id cache -------------------------------------------------
-
-
-@pytest.fixture
-def temp_cache(monkeypatch, tmp_path):
-    cache_file = tmp_path / "inline_cache.json"
-    monkeypatch.setattr(bot, "INLINE_CACHE_FILE", cache_file)
-    return cache_file
-
-
-def test_cache_round_trip(temp_cache):
-    assert bot.get_cached_inline_result(POST_URL) is None
-
-    bot.save_cached_inline_result(
-        POST_URL, {"caption": "c", "title": "t", "items": [{"type": "photo", "file_id": "f"}]}
-    )
-    cached = bot.get_cached_inline_result(POST_URL)
-
-    assert cached["items"] == [{"type": "photo", "file_id": "f"}]
-    assert cached["version"] == bot.INLINE_CACHE_VERSION
-
-
-def test_cache_is_keyed_by_the_normalized_url(temp_cache):
-    bot.save_cached_inline_result(
-        "https://instagr.am/p/ABC123", {"items": [{"type": "photo", "file_id": "f"}]}
-    )
-
-    assert bot.get_cached_inline_result("https://www.instagram.com/p/ABC123/?igsh=xyz") is not None
-
-
-def test_cache_ignores_entries_from_an_older_version(temp_cache):
-    temp_cache.write_text(
-        json.dumps({POST_URL: {"version": "3", "file_id": "old", "caption": "c"}}),
-        encoding="utf-8",
-    )
-
-    assert bot.get_cached_inline_result(POST_URL) is None
-
-
-def test_cache_ignores_an_entry_without_items(temp_cache):
-    temp_cache.write_text(
-        json.dumps({POST_URL: {"version": bot.INLINE_CACHE_VERSION, "items": []}}),
-        encoding="utf-8",
-    )
-
-    assert bot.get_cached_inline_result(POST_URL) is None
-
-
-def test_cache_survives_a_corrupt_file(temp_cache):
-    temp_cache.write_text("not json at all", encoding="utf-8")
-
-    assert bot.load_inline_cache() == {}

@@ -150,6 +150,24 @@ STORAGE_CHAT_ID=-1001234567890
 
 Первый inline-запрос для новой публикации может занять больше времени: бот скачивает файлы и загружает их в storage-чат. Если Telegram покажет результат `Готовлю видео...`, выберите его - сообщение обновится само, как только публикация будет готова. Повторные запросы по той же ссылке работают из кэша.
 
+### Кэш `file_id`
+
+Кэш хранится в SQLite: файл из `INLINE_CACHE_DB`, на сервере это `data/inline_cache.sqlite3` в каталоге деплоя. В таблице `posts` одна строка на публикацию: нормализованная ссылка (`url`), версия формата кэша (`version`), подпись и `file_id` файлов в JSON (`result`) и время записи (`saved_at`). Поиск идёт по ключу и не зависит от размера кэша, а каждая запись - транзакция: если контейнер перезапустится посреди записи, пропадёт только она, а не весь кэш.
+
+Раньше кэш лежал в JSON-файле `INLINE_CACHE_FILE`. При первом запуске, когда базы ещё нет, бот переносит из него все публикации и пишет в лог, сколько перенёс. После этого файл не нужен, его можно удалить.
+
+Базу можно смотреть и править прямо на работающем боте: удалённая строка перестаёт находиться сразу. Бот при этом просто скачает публикацию заново. Понадобится `sqlite3` (`sudo apt install sqlite3`); запускайте его от пользователя, под которым идёт деплой, чтобы служебные файлы базы (`-wal`, `-shm`) не достались root:
+
+```bash
+cd /opt/nonnus_bot/data
+# сколько публикаций в кэше
+sqlite3 inline_cache.sqlite3 "SELECT COUNT(*) FROM posts"
+# найти публикацию по шорткоду
+sqlite3 inline_cache.sqlite3 "SELECT url, version, saved_at FROM posts WHERE url LIKE '%DO34j-fjCwE%'"
+# убрать её из кэша - следующий запрос скачает её заново
+sqlite3 inline_cache.sqlite3 "DELETE FROM posts WHERE url = 'https://www.instagram.com/p/DO34j-fjCwE/'"
+```
+
 ## Docker
 
 Локально можно собрать и запустить контейнер через Docker Compose:
@@ -284,7 +302,7 @@ $HOME/instagram-reels-bot
 
 На сервере должны быть установлены Docker и Docker Compose plugin.
 
-Если контейнер не может записать inline-кэш в `/app/data/inline_cache.json`, проверьте владельца data-директории. При deploy через GitHub Actions контейнер запускается с UID/GID SSH-пользователя. Для `DEPLOY_PATH=/opt/nonnus_bot` можно исправить так:
+Если контейнер не может записать inline-кэш в `/app/data/inline_cache.sqlite3`, проверьте владельца data-директории. При deploy через GitHub Actions контейнер запускается с UID/GID SSH-пользователя. Для `DEPLOY_PATH=/opt/nonnus_bot` можно исправить так:
 
 ```bash
 sudo chown -R YOUR_SSH_USER:YOUR_SSH_USER /opt/nonnus_bot/data
