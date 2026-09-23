@@ -7,9 +7,21 @@ from urllib.parse import urlparse
 
 
 # The web app links a post opened from a profile as /<username>/p/<code>/, so
-# an optional username segment may come before the post type.
+# an optional username segment may come before the post type. m.instagram.com
+# is the mobile site; it answers with a redirect to the same path on www, so
+# its links carry the real shortcode.
+#
+# The app's share sheet also hands out /share/<id>, /share/reel/<id> and
+# /share/p/<id>. The <id> there is not a shortcode, and "share" is not a
+# username - so those are matched on their own, and have to be resolved into
+# the post they stand for before anything else is done with them (see
+# instagram.resolve_share_link). The share branch is what lets /share/<id>,
+# with no post type, match at all; /share/reel/<id> would match the username
+# branch too, and it makes no difference which does - is_share_link tells a
+# share link by its path, not by how the pattern matched it.
 INSTAGRAM_URL_RE = re.compile(
-    r"https?://(?:www\.)?(?:instagram\.com|instagr\.am)/(?:[A-Za-z0-9._]{1,30}/)?(?:reel|reels|p|tv)/[A-Za-z0-9_\-]+/?"
+    r"https?://(?:www\.|m\.)?(?:instagram\.com|instagr\.am)/"
+    r"(?:share/(?:reels?/|p/)?[A-Za-z0-9_\-]+|(?:[A-Za-z0-9._]{1,30}/)?(?:reel|reels|p|tv)/[A-Za-z0-9_\-]+)/?"
     r"(?:\?[^\s.,!?;:()\[\]{}<>'\"]+)?",
     re.IGNORECASE,
 )
@@ -18,6 +30,12 @@ INSTAGRAM_URL_RE = re.compile(
 def find_instagram_url(text: str) -> Optional[str]:
     match = INSTAGRAM_URL_RE.search(text or "")
     return match.group(0) if match else None
+
+
+def is_share_link(url: str) -> bool:
+    """A link from the app's share sheet, which names no post by itself."""
+    parts = [part for part in urlparse(url).path.split("/") if part]
+    return bool(parts) and parts[0].lower() == "share"
 
 
 INSTAGRAM_POST_TYPES = ("p", "reel", "reels", "tv")

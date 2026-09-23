@@ -56,12 +56,16 @@ RECOVERY_TEXT = "Контрольный пост снова скачиваетс
 async def check_once(bot: Any, url: str) -> Optional[BaseException]:
     """Download the post once; the error if that failed, None if it came
     through whole."""
+    post_url = await preparation.resolve_link(url)
+    if post_url is None:
+        return RuntimeError(f"Instagram did not say which post the share link {url} stands for")
+
     temp_dir = Path(tempfile.mkdtemp(prefix="ig_canary_"))
     try:
         # download_post_in_thread only needs the bot from a context - to
         # send the cookie alert, which a check can trigger like any request.
         context = SimpleNamespace(bot=bot)
-        items, _ = await preparation.download_post_in_thread(url, temp_dir, context)
+        items, _ = await preparation.download_post_in_thread(post_url, temp_dir, context)
         await preparation.prepare_items_in_thread(items, temp_dir)
         return None
     except Exception as error:

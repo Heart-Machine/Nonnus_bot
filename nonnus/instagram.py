@@ -8,6 +8,7 @@ import re
 import shutil
 import threading
 import time
+import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import (
@@ -17,7 +18,7 @@ from typing import (
     Tuple,
     TypeVar,
 )
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, urljoin, urlparse
 
 from yt_dlp import YoutubeDL
 from yt_dlp.utils import ExtractorError, YoutubeDLError
@@ -90,6 +91,73 @@ INSTAGRAM_IMAGE_HEADERS = {
     ),
     "Referer": "https://www.instagram.com/",
 }
+
+
+# A share link answers a desktop browser with the web app's JavaScript shell -
+# the very same page whether the link exists or not - but a phone, or a link
+# preview crawler, with a redirect to the post itself. Checked against
+# Instagram: /share/<id>, /share/reel/<id> and /share/p/<id> all 302 to
+# /reel/<shortcode>/ for an iPhone Safari user agent, and a made-up id gets
+# the shell whatever the agent. So a share link is asked about as a phone.
+SHARE_LINK_USER_AGENT = (
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 "
+    "(KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1"
+)
+SHARE_LINK_TIMEOUT_SECONDS = 10
+# instagram.com and m.instagram.com first send a share link on to www, then
+# www sends it to the post: two hops, with one to spare.
+SHARE_LINK_MAX_REDIRECTS = 3
+INSTAGRAM_HOSTS = {"instagram.com", "www.instagram.com", "m.instagram.com", "instagr.am", "www.instagr.am"}
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *args: Any, **kwargs: Any) -> None:
+        return None
+
+
+def redirect_target(url: str) -> Optional[str]:
+    """Where `url` redirects to, without going there; None if it answers
+    with a page instead."""
+    request = urllib.request.Request(url, headers={"User-Agent": SHARE_LINK_USER_AGENT}, method="HEAD")
+    try:
+        with urllib.request.build_opener(_NoRedirect).open(request, timeout=SHARE_LINK_TIMEOUT_SECONDS):
+            return None
+    except urllib.error.HTTPError as error:
+        with error:
+            location = error.headers.get("Location")
+            if error.code in (301, 302, 303, 307, 308) and location:
+                return urljoin(url, location)
+        return None
+
+
+def resolve_share_link(url: str) -> Optional[str]:
+    """The post a share link stands for, as a link to it; None when Instagram
+    would not say.
+
+    Only redirects within Instagram are followed - a share link is not an
+    open door to wherever its answer points - and only a few of them."""
+    current = url
+    for _ in range(SHARE_LINK_MAX_REDIRECTS):
+        try:
+            target = redirect_target(current)
+        except (OSError, ValueError, http.client.HTTPException):
+            logger.exception("Failed to resolve the share link %s", url)
+            return None
+
+        if target is None:
+            logger.warning("Instagram answered the share link %s without saying which post it is", url)
+            return None
+        if urlparse(target).netloc.lower() not in INSTAGRAM_HOSTS:
+            logger.warning("The share link %s redirects away from Instagram, to %s; not following", url, target)
+            return None
+
+        post = links.find_instagram_url(target)
+        if post and not links.is_share_link(post):
+            return post
+        current = target
+
+    logger.warning("The share link %s kept redirecting without reaching a post", url)
+    return None
 
 
 # How long to go without the cookies once Instagram has turned them down,

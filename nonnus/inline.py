@@ -272,6 +272,24 @@ async def handle_inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE
         )
         return
 
+    post_url = await preparation.resolve_link(url)
+    if post_url is None:
+        await inline_query.answer(
+            [
+                build_inline_article(
+                    "share-unresolved",
+                    "Не получилось открыть ссылку",
+                    "Пришли обычную ссылку на пост",
+                    "Не получилось понять, на какой пост ведёт эта ссылка. "
+                    "Нужна обычная ссылка на пост - в Instagram это «Копировать ссылку».",
+                )
+            ],
+            cache_time=0,
+            is_personal=True,
+        )
+        return
+    url = post_url
+
     cached_result = cache.get_cached_inline_result(url)
     if cached_result:
         try:
@@ -380,6 +398,10 @@ async def handle_chosen_inline_result(update: Update, context: ContextTypes.DEFA
 
     url = links.find_instagram_url(chosen.query)
     if not url:
+        return
+    # A share link was resolved for the query itself, so this is a lookup.
+    url = await preparation.resolve_link(url)
+    if url is None:
         return
 
     # Telegram reports an inline_message_id only for a result with a button.
