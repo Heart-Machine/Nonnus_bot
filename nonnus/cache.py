@@ -53,6 +53,9 @@ class PostCache:
             (url, version, json.dumps(result, ensure_ascii=False)),
         )
 
+    def delete(self, url: str) -> None:
+        self._connect().execute("DELETE FROM posts WHERE url = ?", (url,))
+
     def close(self) -> None:
         if self._connection is not None:
             self._connection.close()
@@ -150,3 +153,12 @@ def save_cached_inline_result(url: str, cached_result: dict[str, Any]) -> None:
         POST_CACHE.put(links.normalize_post_url(url), INLINE_CACHE_VERSION, result)
     except (sqlite3.Error, OSError):
         logger.exception("Failed to save %s to the post cache", url)
+
+
+def forget_cached_inline_result(url: str) -> None:
+    """Drop a post whose file_ids Telegram no longer accepts, so the next
+    request prepares it again instead of failing on them forever."""
+    try:
+        POST_CACHE.delete(links.normalize_post_url(url))
+    except (sqlite3.Error, OSError):
+        logger.exception("Failed to drop %s from the post cache", url)

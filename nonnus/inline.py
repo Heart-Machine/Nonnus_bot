@@ -274,8 +274,17 @@ async def handle_inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     cached_result = cache.get_cached_inline_result(url)
     if cached_result:
-        await inline_query.answer(build_inline_results(url, cached_result, await delivery.get_bot_username(context)), cache_time=0, is_personal=True)
-        return
+        try:
+            await inline_query.answer(build_inline_results(url, cached_result, await delivery.get_bot_username(context)), cache_time=0, is_personal=True)
+            return
+        except TelegramError as error:
+            if not delivery.is_dead_file_id_error(error):
+                raise
+            # A refused answer does not use the query up, so it can still be
+            # answered below - with the placeholder, while the post is
+            # prepared again.
+            logger.warning("Telegram no longer accepts the cached files of %s (%s), preparing it again", url, error)
+            cache.forget_cached_inline_result(url)
 
     if not config.STORAGE_CHAT_ID:
         await inline_query.answer(
@@ -292,12 +301,12 @@ async def handle_inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE
         )
         return
 
-    task = preparation.get_or_create_prepare_task(url, context)
+    task = preparation.get_or_create_prepare_task(url, context, reuse_failure=True)
 
-    # A zero-cost check, not a wait: if this task was already started by a
-    # concurrent request for the same URL and happened to finish in the
-    # meantime, we can answer with the real video right away. Otherwise -
-    # no artificial delay - answer immediately with a self-updating
+    # A zero-cost check, not a wait: a task already done is one that failed
+    # moments ago - kept on hand for that - or one that just finished, so
+    # this query answers with its outcome right away. Otherwise - no
+    # artificial delay - answer immediately with a self-updating
     # placeholder; handle_chosen_inline_result() swaps it for the real
     # video via editMessageMedia once the same task completes.
     if task.done():
@@ -383,7 +392,7 @@ async def handle_chosen_inline_result(update: Update, context: ContextTypes.DEFA
 
     cached_result = cache.get_cached_inline_result(url)
     if cached_result is None:
-        task = preparation.get_or_create_prepare_task(url, context)
+        task = preparation.get_or_create_prepare_task(url, context, reuse_failure=True)
         try:
             cached_result = await task
         except Exception:
@@ -414,5 +423,9 @@ async def handle_chosen_inline_result(update: Update, context: ContextTypes.DEFA
             media=media,
             reply_markup=reply_markup,
         )
-    except TelegramError:
+    except TelegramError as error:
         logger.exception("Failed to swap placeholder for the prepared media (inline_message_id=%s)", chosen.inline_message_id)
+        if delivery.is_dead_file_id_error(error):
+            # This message stays the placeholder, but the next request for
+            # the post prepares it again rather than failing the same way.
+            cache.forget_cached_inline_result(url)
