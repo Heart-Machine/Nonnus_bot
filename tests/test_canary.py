@@ -20,6 +20,16 @@ class RecordingBot:
     async def send_message(self, **kwargs):
         self.sent.append(kwargs)
 
+    # Set at start next to the canary; not what these tests look at.
+    async def set_my_commands(self, *args, **kwargs):
+        pass
+
+    async def set_my_short_description(self, *args, **kwargs):
+        pass
+
+    async def set_my_description(self, *args, **kwargs):
+        pass
+
 
 @pytest.fixture(autouse=True)
 def no_waiting(monkeypatch):

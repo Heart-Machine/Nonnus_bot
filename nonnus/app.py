@@ -1,8 +1,9 @@
 """Wiring the handlers into the application."""
 
 import logging
+from typing import Any
 
-from telegram import Update
+from telegram import BotCommand, Update
 from telegram.error import TelegramError
 from telegram.ext import (
     Application,
@@ -51,7 +52,44 @@ async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
         logger.warning("Could not tell the user about the error either", exc_info=True)
 
 
+# What Telegram shows about the bot, kept here rather than typed into BotFather
+# so it lives in the repository with everything else. It is set on every
+# start, which also means an edit made in BotFather lasts until the next one.
+#
+# /chatid stays out of the menu: it is for setting up the storage chat, not
+# something users need.
+BOT_COMMANDS = [BotCommand("start", "Как пользоваться ботом")]
+
+BOT_SHORT_DESCRIPTION = "Пришли ссылку на рилс, фото или карусель из Instagram - пришлю их сюда."
+
+BOT_DESCRIPTION = (
+    "Скачиваю публикации из Instagram: рилсы, посты с фото и карусели. "
+    "Карусель приходит одним сообщением, которое можно листать.\n\n"
+    "Как пользоваться:\n"
+    "• пришли мне ссылку в личку;\n"
+    "• в группе упомяни меня вместе со ссылкой;\n"
+    "• в любом чате набери моё имя через @ и вставь ссылку.\n\n"
+    "Работает с публичными публикациями."
+)
+
+
+async def publish_bot_profile(bot: Any) -> None:
+    """Set the command menu and the descriptions. Each on its own, and a
+    failure only logged: a bot with a stale description still works, a bot
+    that would not start over one does not."""
+    for what, call in (
+        ("command menu", lambda: bot.set_my_commands(BOT_COMMANDS)),
+        ("short description", lambda: bot.set_my_short_description(BOT_SHORT_DESCRIPTION)),
+        ("description", lambda: bot.set_my_description(BOT_DESCRIPTION)),
+    ):
+        try:
+            await call()
+        except TelegramError:
+            logger.warning("Failed to set the bot's %s", what, exc_info=True)
+
+
 async def start_background_jobs(application: Application) -> None:
+    await publish_bot_profile(application.bot)
     application.bot_data["canary_task"] = canary.start(application.bot)
 
 
