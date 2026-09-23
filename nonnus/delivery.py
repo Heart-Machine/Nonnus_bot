@@ -9,7 +9,7 @@ from typing import Any, Callable, Optional
 
 from telegram import InputMediaDocument, InputMediaPhoto, InputMediaVideo
 from telegram.constants import ParseMode
-from telegram.error import BadRequest
+from telegram.error import BadRequest, TelegramError
 from telegram.ext import ContextTypes
 
 from nonnus import config, links, media
@@ -28,6 +28,28 @@ UPLOAD_TIMEOUTS: dict[str, Any] = {
     "connect_timeout": 30,
     "pool_timeout": 30,
 }
+
+
+# How Telegram words a refusal of the file_id itself, rather than of the
+# chat or the message: a file_id belongs to the bot that uploaded the file, so
+# a cache kept under another bot token is full of them, and one Telegram has
+# dropped reads the same way. There is no error code for it, only the text.
+DEAD_FILE_ID_MARKERS = (
+    "wrong file identifier",
+    "wrong remote file identifier",
+    "file reference",
+    "file_reference",
+    "type of file mismatch",
+    "media_empty",
+)
+
+
+def is_dead_file_id_error(error: TelegramError) -> bool:
+    """Whether Telegram turned a send down over its file_ids - which a new
+    upload fixes - and not over something a new upload would hit again, like
+    missing rights in the chat."""
+    message = error.message.lower()
+    return isinstance(error, BadRequest) and any(marker in message for marker in DEAD_FILE_ID_MARKERS)
 
 
 def parse_storage_chat_id() -> int | str:

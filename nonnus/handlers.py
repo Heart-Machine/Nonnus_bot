@@ -23,6 +23,11 @@ INCOMPLETE_POST_TEXT = (
 )
 
 
+SEND_FAILED_TEXT = (
+    "Не получилось отправить публикацию в этот чат. Если она не пришла, пришли ссылку ещё раз."
+)
+
+
 async def is_message_addressed_to_bot(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
     message = update.message
     if message is None:
@@ -100,8 +105,20 @@ async def deliver_post(message, url: str, context: ContextTypes.DEFAULT_TYPE) ->
     if cached_result:
         try:
             await delivery.send_prepared_result(message, cached_result, url)
-        except TelegramError:
-            logger.exception("Failed to resend cached media for %s, falling back to a fresh download", url)
+        except TelegramError as error:
+            if not delivery.is_dead_file_id_error(error):
+                # Not the files - the chat, or the network. Sending again
+                # would not help, and after a timeout the post may well have
+                # arrived already, so it would arrive twice.
+                logger.exception("Failed to send cached media for %s", url)
+                await status_message.edit_text(SEND_FAILED_TEXT)
+                return
+
+            # The files are gone for this bot. Forget them, so that the
+            # preparation below downloads the post again instead of handing
+            # back the same file_ids from the cache.
+            logger.warning("Telegram no longer accepts the cached files of %s (%s), preparing it again", url, error)
+            cache.forget_cached_inline_result(url)
         else:
             await status_message.delete()
             return

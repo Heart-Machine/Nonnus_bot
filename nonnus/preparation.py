@@ -80,21 +80,47 @@ async def prepare_inline_post(url: str, context: ContextTypes.DEFAULT_TYPE) -> d
         shutil.rmtree(temp_dir, ignore_errors=True)
 
 
-def get_or_create_prepare_task(url: str, context: ContextTypes.DEFAULT_TYPE) -> asyncio.Task:
+# How long a failed preparation keeps answering inline queries for its post.
+# The client sends a new inline query on every keystroke, so without this each
+# one would start the download over - for a private or deleted post, two full
+# yt-dlp runs apiece, with the cookies and without.
+FAILED_PREPARATION_MEMORY_SECONDS = 60
+
+
+def get_or_create_prepare_task(
+    url: str,
+    context: ContextTypes.DEFAULT_TYPE,
+    reuse_failure: bool = False,
+) -> asyncio.Task:
     """Reuse an in-flight prepare_inline_post() task for the same post so
     concurrent requests - inline queries and direct messages alike - don't
-    trigger duplicate downloads and uploads for the same URL."""
+    trigger duplicate downloads and uploads for the same URL.
+
+    A task that failed stays on hand for FAILED_PREPARATION_MEMORY_SECONDS,
+    and with reuse_failure it is what comes back - already done, so the
+    inline query answers with the error at once instead of downloading again.
+    A link sent to the bot directly is someone asking for another try, so
+    without reuse_failure a failed task is replaced by a new one."""
     cache_key = links.normalize_post_url(url)
     inline_tasks = context.application.bot_data.setdefault("inline_tasks", {})
     task = inline_tasks.get(cache_key)
-    if task is None or task.done():
-        task = context.application.create_task(prepare_inline_post(url, context))
-        inline_tasks[cache_key] = task
+    if task is not None and (not task.done() or reuse_failure):
+        return task
 
-        def forget_task(done_task: asyncio.Task, key: str = cache_key) -> None:
-            if inline_tasks.get(key) is done_task:
-                inline_tasks.pop(key, None)
+    task = context.application.create_task(prepare_inline_post(url, context))
+    inline_tasks[cache_key] = task
 
-        task.add_done_callback(forget_task)
+    def forget_task(key: str = cache_key, done_task: asyncio.Task = task) -> None:
+        if inline_tasks.get(key) is done_task:
+            inline_tasks.pop(key, None)
 
+    def on_done(done_task: asyncio.Task) -> None:
+        # A post that came through is in the cache now, so its task has
+        # nothing more to offer; a failed one is kept a while as the answer.
+        if done_task.cancelled() or done_task.exception() is None:
+            forget_task()
+        else:
+            asyncio.get_running_loop().call_later(FAILED_PREPARATION_MEMORY_SECONDS, forget_task)
+
+    task.add_done_callback(on_done)
     return task
