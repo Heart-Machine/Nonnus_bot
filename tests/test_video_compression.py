@@ -7,6 +7,7 @@ and when trying stops. The scale filter is checked against the real ffmpeg,
 where one is installed.
 """
 import asyncio
+import os
 import shutil
 import subprocess
 import threading
@@ -133,8 +134,12 @@ def test_every_try_is_encoded_as_yuv420p(encoder):
 # --- the scale filter, on the real ffmpeg --------------------------------
 
 
+# Skipped on a machine without ffmpeg - but not in CI, which installs it: there
+# a missing ffmpeg is a broken setup and should fail, not go unnoticed. GitHub
+# Actions sets CI=true.
 needs_ffmpeg = pytest.mark.skipif(
-    shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None, reason="ffmpeg is not installed"
+    (shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None) and os.environ.get("CI") != "true",
+    reason="ffmpeg is not installed",
 )
 
 

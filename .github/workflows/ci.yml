@@ -36,6 +36,16 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements-dev.txt
 
+      # The runner image has no ffmpeg, and the tests that run the real one -
+      # the scale filter compress_video uses - would otherwise skip here. In
+      # CI they fail rather than skip when it is missing, so this step
+      # breaking cannot quietly switch them off.
+      - name: Install ffmpeg
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends ffmpeg
+          ffmpeg -version | head -n 1
+
       - name: Check the runtime lock is in sync
         env:
           # Keeps the generated header identical however pip-compile is
