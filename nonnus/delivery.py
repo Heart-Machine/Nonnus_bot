@@ -1,6 +1,7 @@
 """Sending posts to Telegram: uploading to the storage chat, and sending a
 prepared post back - as a slideshow, an album or a single file."""
 
+import asyncio
 import logging
 from html import unescape
 import re
@@ -199,12 +200,22 @@ def file_reference_from_message(message) -> dict[str, str]:
     raise RuntimeError("Telegram did not return a file_id for the uploaded media")
 
 
+async def video_hints(item: media.MediaItem) -> dict[str, Any]:
+    """media.video_send_hints for a video, run off the event loop: it starts
+    ffprobe twice and waits on it, and every other update would wait too."""
+    if not item.is_video:
+        return {}
+
+    return await asyncio.to_thread(media.video_send_hints, item.path)
+
+
 async def upload_item_to_storage(
     context: ContextTypes.DEFAULT_TYPE,
     storage_chat_id: int | str,
     item: media.MediaItem,
     caption: Optional[str],
 ) -> dict[str, str]:
+    hints = await video_hints(item)
     try:
         with item.path.open("rb") as media_file:
             if item.is_video:
@@ -214,7 +225,7 @@ async def upload_item_to_storage(
                     caption=caption,
                     parse_mode=ParseMode.HTML,
                     supports_streaming=True,
-                    **media.video_send_hints(item.path),
+                    **hints,
                     **UPLOAD_TIMEOUTS,
                 )
             else:
@@ -398,6 +409,7 @@ async def send_local_media_items(message, items: list[media.MediaItem], caption:
 async def send_local_item(message, item: media.MediaItem, caption: Optional[str]) -> None:
     """One file from disk as a message of its own - as a document if Telegram
     will not take it as a photo or video."""
+    hints = await video_hints(item)
     try:
         with item.path.open("rb") as media_file:
             if item.is_video:
@@ -407,7 +419,7 @@ async def send_local_item(message, item: media.MediaItem, caption: Optional[str]
                     caption=caption,
                     parse_mode=ParseMode.HTML,
                     supports_streaming=True,
-                    **media.video_send_hints(item.path),
+                    **hints,
                     **UPLOAD_TIMEOUTS,
                 )
             else:
