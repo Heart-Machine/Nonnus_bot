@@ -264,12 +264,10 @@ SSH_PRIVATE_KEY
 
 ```text
 SSH_PORT
-GHCR_USERNAME
-GHCR_TOKEN
 INSTAGRAM_COOKIES_B64
 ```
 
-`GHCR_USERNAME` и `GHCR_TOKEN` нужны, если GHCR package приватный. Для `GHCR_TOKEN` используйте GitHub Personal Access Token с правом `read:packages`.
+Секретов для GHCR заводить не нужно, даже если package приватный. Сервер скачивает образ с токеном самого запуска (`GITHUB_TOKEN`): доступ к пакетам у него уже есть через `permissions: packages: write`, а живёт он, только пока идёт job, - хранить, обновлять и отзывать нечего. На сервере учётные данные лежат во временном `DOCKER_CONFIG`, который скрипт деплоя удаляет в конце, даже если деплой упал, так что в `~/.docker/config.json` ничего не остаётся.
 
 Если нужны Instagram cookies на сервере, закодируйте cookies-файл в base64 и сохраните результат в `INSTAGRAM_COOKIES_B64`:
 
