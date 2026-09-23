@@ -127,6 +127,69 @@ def test_best_photo_url_falls_back_to_the_single_thumbnail():
     assert bot.best_photo_url({}) is None
 
 
+def cdn(stp=None, path="/v/t51.2885-15/541_902_n.jpg"):
+    """A photo URL the way Instagram's CDN hands them out, markers in stp."""
+    query = f"stp={stp}&_nc_ht=scontent" if stp else "_nc_ht=scontent"
+    return f"https://scontent.cdninstagram.com{path}?{query}"
+
+
+def logged_out(*urls):
+    # Logged out, Instagram gives variants with no sizes at all.
+    return {"thumbnails": [{"url": url} for url in urls]}
+
+
+def test_best_photo_url_skips_square_crops_that_come_first():
+    # The order DO34j-fjCwE came in: seven square crops of a 1440x1920
+    # photo, then the full frame. Taking the first meant a 1080x1080 square.
+    crops = [cdn(f"c0.240.1440.1440a_dst-jpg_e35_s{n}x{n}_tt6") for n in (1080, 150, 240, 320, 480, 640, 750)]
+    original = cdn("dst-jpg_e35_tt6")
+    frames = [cdn("dst-jpg_e35_p1080x1080_tt6"), cdn("dst-jpg_e35_p320x320_tt6"), cdn("dst-jpg_e35_s640x640_tt6")]
+
+    assert bot.best_photo_url(logged_out(*crops, *frames, original)) == original
+
+
+def test_best_photo_url_takes_the_original_when_it_comes_first():
+    # The order DHhOwXQN2ER came in: the original, then scaled-down copies.
+    original = cdn()
+    copies = [cdn(f"dst-webp_s{n}x{n}") for n in (1080, 150, 240, 750)]
+
+    assert bot.best_photo_url(logged_out(original, *copies)) == original
+
+
+def test_best_photo_url_takes_the_largest_bound_without_an_original():
+    small, large = cdn("dst-jpg_e35_p640x640"), cdn("dst-jpg_e35_p1080x1080")
+    crop = cdn("c0.240.1440.1440a_dst-jpg_e35_s1440x1440")
+
+    assert bot.best_photo_url(logged_out(small, crop, large)) == large
+
+
+def test_best_photo_url_still_returns_something_when_there_are_only_crops():
+    small, large = cdn("c0.240.1440.1440a_s320x320"), cdn("c0.240.1440.1440a_s1080x1080")
+
+    assert bot.best_photo_url(logged_out(small, large)) == large
+
+
+def test_best_photo_url_reads_markers_from_the_path_of_older_links():
+    crop = cdn(path="/v/t51.2885-15/c0.240.1440.1440a/s1080x1080/541_n.jpg")
+    copy = cdn(path="/v/t51.2885-15/s640x640/541_n.jpg")
+    original = cdn(path="/v/t51.2885-15/541_n.jpg")
+
+    assert bot.best_photo_url(logged_out(crop, copy, original)) == original
+
+
+def test_best_photo_url_prefers_the_full_frame_even_when_sizes_are_known():
+    # Logged in, sizes come along; a crop of the same photo is smaller anyway,
+    # but it must not win on a tie.
+    entry = {
+        "thumbnails": [
+            {"url": cdn("c0.0.1440.1440a_s1440x1440"), "width": 1440, "height": 1440},
+            {"url": cdn("dst-jpg_e35"), "width": 1440, "height": 1440},
+        ]
+    }
+
+    assert bot.best_photo_url(entry) == cdn("dst-jpg_e35")
+
+
 def test_post_entries_wraps_a_single_medium_post():
     entry = video_entry()
     assert bot.post_entries(entry) == [entry]

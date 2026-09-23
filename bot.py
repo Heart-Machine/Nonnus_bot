@@ -15,7 +15,7 @@ from contextlib import ExitStack
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Iterator, Optional, Tuple, TypeVar
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 from dotenv import load_dotenv
 from telegram import (
@@ -1150,17 +1150,48 @@ def download_post_videos(
     return video_paths
 
 
-def best_photo_url(entry: dict[str, Any]) -> Optional[str]:
-    thumbnails = [thumbnail for thumbnail in entry.get("thumbnails") or [] if thumbnail.get("url")]
-    if thumbnails:
-        best_thumbnail = max(
-            thumbnails,
-            key=lambda thumbnail: (thumbnail.get("width") or 0) * (thumbnail.get("height") or 0),
-        )
-        return str(best_thumbnail["url"])
+# How Instagram marks a photo variant in its CDN URL: a crop directive,
+# c<x>.<y>.<width>.<height>a - c0.240.1440.1440a is the square cut from row 240
+# of a 1440x1920 frame - and a size bound, s<w>x<h> or p<w>x<h>, for a
+# scaled-down copy. Both live in the stp query parameter, or as path segments
+# on older links.
+PHOTO_CROP_RE = re.compile(r"(?:^|_)c\d+\.\d+\.\d+\.\d+a(?:_|$)")
+PHOTO_SIZE_BOUND_RE = re.compile(r"(?:^|_)[sp](\d+)x(\d+)(?:_|$)")
 
-    thumbnail_url = entry.get("thumbnail")
-    return str(thumbnail_url) if thumbnail_url else None
+
+def photo_variant_markers(url: str) -> str:
+    parsed = urlparse(url)
+    stp = parse_qs(parsed.query).get("stp", [""])[0]
+    return f"{stp}_{parsed.path.replace('/', '_')}"
+
+
+def best_photo_url(entry: dict[str, Any]) -> Optional[str]:
+    """The full frame of a photo, at the largest size Instagram offers.
+
+    Next to the full frame Instagram lists square crops made for the profile
+    grid. Logged in, every variant comes with its size; logged out, none do -
+    only URLs, in an order that cannot be relied on: one post leads with the
+    original, the next with a 1080x1080 crop of a 1440x1920 photo. So a crop
+    is recognised by its marker in the URL and ruled out, and among the rest
+    the real size decides when it is known, otherwise the size bound in the
+    URL, with a variant that has no bound at all - the original upload -
+    ranked above every scaled-down copy."""
+    thumbnails = [thumbnail for thumbnail in entry.get("thumbnails") or [] if thumbnail.get("url")]
+    if not thumbnails:
+        thumbnail_url = entry.get("thumbnail")
+        return str(thumbnail_url) if thumbnail_url else None
+
+    def rank(thumbnail: dict[str, Any]) -> Tuple[bool, float]:
+        markers = photo_variant_markers(str(thumbnail["url"]))
+        is_full_frame = PHOTO_CROP_RE.search(markers) is None
+        width, height = thumbnail.get("width"), thumbnail.get("height")
+        if width and height:
+            return is_full_frame, width * height
+
+        bound = PHOTO_SIZE_BOUND_RE.search(markers)
+        return is_full_frame, int(bound.group(1)) * int(bound.group(2)) if bound else float("inf")
+
+    return str(max(thumbnails, key=rank)["url"])
 
 
 def download_photo(entry: dict[str, Any], index: int, download_dir: Path) -> Optional[Path]:
