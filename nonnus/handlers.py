@@ -28,6 +28,19 @@ SEND_FAILED_TEXT = (
 )
 
 
+UPLOAD_FAILED_TEXT = (
+    "Публикация скачалась, но загрузить её в Telegram не получилось. Попробуй ещё раз чуть позже."
+)
+
+
+def too_large_text(error: media.MediaTooLargeError) -> str:
+    """Name the limit that was actually crossed: a photo's is five times
+    lower than a video's, and "larger than 50 MB" about a 12 MB photo would be
+    plainly wrong."""
+    what = "видео" if error.kind == "video" else "фото"
+    return f"Публикация скачалась, но {what} в ней больше {error.limit_mb} МБ, а Telegram такие не принимает."
+
+
 async def is_message_addressed_to_bot(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
     message = update.message
     if message is None:
@@ -141,11 +154,17 @@ async def deliver_post(message, url: str, context: ContextTypes.DEFAULT_TYPE) ->
             logger.exception("Could not fetch all of %s", url)
             await status_message.edit_text(INCOMPLETE_POST_TEXT)
             return
-        except media.MediaTooLargeError:
+        except media.MediaTooLargeError as error:
             logger.exception("Media too large for %s", url)
-            await status_message.edit_text(
-                f"Публикация скачалась, но файл больше {config.MAX_FILE_SIZE_MB} МБ. Telegram может не принять такой файл."
-            )
+            await status_message.edit_text(too_large_text(error))
+            return
+        except TelegramError:
+            # The one thing in the preparation that talks to Telegram is the
+            # upload to the storage chat, so the post itself came through.
+            # Blaming it - private, deleted - would send the user looking in
+            # the wrong place; the storage chat is what to check.
+            logger.exception("Failed to upload %s to the storage chat", url)
+            await status_message.edit_text(UPLOAD_FAILED_TEXT)
             return
         except Exception:
             logger.exception("Failed to prepare %s", url)
@@ -202,10 +221,8 @@ async def deliver_post(message, url: str, context: ContextTypes.DEFAULT_TYPE) ->
 
         try:
             media.ensure_items_fit_telegram(items)
-        except media.MediaTooLargeError:
-            await status_message.edit_text(
-                f"Публикация скачалась, но файл больше {config.MAX_FILE_SIZE_MB} МБ. Telegram может не принять такой файл."
-            )
+        except media.MediaTooLargeError as error:
+            await status_message.edit_text(too_large_text(error))
             return
 
         try:

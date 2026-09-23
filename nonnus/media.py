@@ -403,13 +403,21 @@ def prepare_items_for_upload(items: list[MediaItem], work_dir: Path) -> Tuple[li
 class MediaTooLargeError(RuntimeError):
     """Raised when a downloaded file still exceeds Telegram's limit after
     compression, so the user is told about the size rather than getting the
-    generic download-failed message."""
+    generic download-failed message.
+
+    It carries which kind of file it was and that kind's limit, since the two
+    differ - 50 MB for a video, 10 MB for a photo - and the message the user
+    gets should name the one that was actually crossed."""
+
+    def __init__(self, kind: str, limit_mb: int) -> None:
+        super().__init__(f"{kind} file is larger than {limit_mb} MB")
+        self.kind = kind
+        self.limit_mb = limit_mb
 
 
 def ensure_items_fit_telegram(items: list[MediaItem]) -> None:
     for item in items:
+        limit_mb = config.MAX_FILE_SIZE_MB if item.is_video else config.PHOTO_MAX_FILE_SIZE_MB
         limit = config.MAX_FILE_SIZE_BYTES if item.is_video else config.PHOTO_MAX_FILE_SIZE_BYTES
         if item.path.stat().st_size > limit:
-            raise MediaTooLargeError(
-                f"{item.kind} file is larger than {limit // (1024 * 1024)} MB"
-            )
+            raise MediaTooLargeError(item.kind, limit_mb)
