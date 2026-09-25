@@ -140,6 +140,7 @@ def choose(monkeypatch, result_id, items):
     update = SimpleNamespace(
         chosen_inline_result=SimpleNamespace(
             result_id=result_id,
+            from_user=SimpleNamespace(id=1, username="someone", first_name="Someone"),
             inline_message_id="inline-message",
             query=POST_URL,
         )
@@ -178,6 +179,8 @@ def test_a_single_file_placeholder_is_swapped_without_a_button(monkeypatch):
 
 
 class RecordingMessage:
+    from_user = SimpleNamespace(id=1, username="someone", first_name="Someone")
+
     def __init__(self):
         self.replies = []
 

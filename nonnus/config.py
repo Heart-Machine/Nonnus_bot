@@ -2,6 +2,7 @@
 
 import os
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
 
@@ -101,6 +102,34 @@ MAX_PARALLEL_DOWNLOADS = max(1, int(os.getenv("MAX_PARALLEL_DOWNLOADS", "3")))
 # A public Instagram post the bot downloads once a day, to notice when
 # Instagram has broken yt-dlp before users do. Empty turns the check off.
 CANARY_POST_URL = os.getenv("CANARY_POST_URL", "").strip()
+
+
+# Telegram user ids of the bot's admins, comma-separated. They are admins
+# whatever the users database says: the first admin can only come from here -
+# someone has to be able to hand out roles - and no command can take it away,
+# so no admin can lock the others out.
+ADMIN_USER_IDS = frozenset(env_int_list("ADMIN_USER_IDS", []))
+
+
+# How many new posts a regular user may have downloaded a day. A post already
+# in the cache costs nothing: the limit is there to spare the Instagram
+# account every download goes through, and a cached post does not touch it.
+# 0 turns the limit off.
+DAILY_DOWNLOAD_LIMIT = max(0, int(os.getenv("DAILY_DOWNLOAD_LIMIT", "5")))
+
+
+# Where the day of the daily limit starts and ends.
+DAILY_LIMIT_TIMEZONE = ZoneInfo(os.getenv("DAILY_LIMIT_TIMEZONE", "").strip() or "Europe/Moscow")
+
+
+# Who uses the bot, their roles and how much they downloaded. A file of its
+# own rather than a table next to the cache: the cache can be thrown away and
+# refills itself, this cannot.
+USERS_DB = Path(os.getenv("USERS_DB", str(BASE_DIR / ".users.sqlite3"))).expanduser()
+
+
+if not USERS_DB.is_absolute():
+    USERS_DB = BASE_DIR / USERS_DB
 
 
 INLINE_CACHE_DB = Path(os.getenv("INLINE_CACHE_DB", str(BASE_DIR / ".inline_cache.sqlite3"))).expanduser()

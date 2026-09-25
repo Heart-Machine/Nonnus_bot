@@ -19,3 +19,8 @@ python-telegram-bot>=21,<23
 yt-dlp>=2025.1.15
 
 python-dotenv>=1.0.1
+
+# The time zone the daily limit counts days in. zoneinfo reads the system's
+# zone database first, and not every system has one - Windows does not, nor
+# does every slim image - so the database comes with the bot.
+tzdata>=2024.1

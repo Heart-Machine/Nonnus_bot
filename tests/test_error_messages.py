@@ -28,6 +28,7 @@ class Status:
 
 class Message:
     chat_id = 1
+    from_user = SimpleNamespace(id=1, username="someone", first_name="Someone")
 
     def __init__(self):
         self.status = Status()

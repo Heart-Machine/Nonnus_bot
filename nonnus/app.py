@@ -16,7 +16,7 @@ from telegram.ext import (
     filters,
 )
 
-from nonnus import config, inline, handlers, canary
+from nonnus import config, inline, handlers, admin, canary
 
 
 LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s: %(message)s"
@@ -155,6 +155,8 @@ def build_application(token: str) -> Application:
     )
     app.add_handler(CommandHandler("start", handlers.start))
     app.add_handler(CommandHandler("chatid", handlers.chatid))
+    app.add_handler(CommandHandler("role", admin.role))
+    app.add_handler(CommandHandler("users", admin.list_users))
     app.add_handler(InlineQueryHandler(inline.handle_inline_query))
     app.add_handler(ChosenInlineResultHandler(inline.handle_chosen_inline_result))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handlers.handle_message))

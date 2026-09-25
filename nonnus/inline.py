@@ -24,7 +24,7 @@ from telegram.constants import ParseMode
 from telegram.error import TelegramError
 from telegram.ext import ContextTypes
 
-from nonnus import config, links, instagram, cache, delivery, preparation, status_message
+from nonnus import config, links, instagram, cache, delivery, preparation, status_message, users
 
 
 logger = logging.getLogger(__name__)
@@ -299,6 +299,7 @@ async def handle_inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE
         )
         return
 
+    users.remember(inline_query.from_user)
     post_url = await preparation.resolve_link(url)
     if post_url is None:
         await inline_query.answer(
@@ -346,7 +347,22 @@ async def handle_inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE
         )
         return
 
-    task = preparation.get_or_create_prepare_task(url, context, reuse_failure=True)
+    try:
+        task = preparation.get_or_create_prepare_task(url, context, reuse_failure=True, user=inline_query.from_user)
+    except users.DailyLimitReached as error:
+        await inline_query.answer(
+            [
+                build_inline_article(
+                    inline_result_id(url),
+                    "На сегодня всё",
+                    "Лимит новых скачиваний на сегодня исчерпан",
+                    users.limit_reached_text(error),
+                )
+            ],
+            cache_time=0,
+            is_personal=True,
+        )
+        return
 
     # A zero-cost check, not a wait: a task already done is one that failed
     # moments ago - kept on hand for that - or one that just finished, so
@@ -444,12 +460,22 @@ async def handle_chosen_inline_result(update: Update, context: ContextTypes.DEFA
 
     cached_result = cache.get_cached_inline_result(url)
     if cached_result is None:
-        task = preparation.get_or_create_prepare_task(url, context, reuse_failure=True)
         # Meanwhile the placeholder's caption shows how the preparation goes,
         # as the status message under a link sent to the bot does.
         status = status_message.PlaceholderStatus(
             context.bot, chosen.inline_message_id, PLACEHOLDERS[placeholder_kind(url)].caption, placeholder_keyboard(url)
         )
+        # Normally the query that offered the placeholder started the
+        # preparation, and this joins it. A new one starts only when that
+        # one is gone - failed and forgotten - and counts like any other.
+        try:
+            task = preparation.get_or_create_prepare_task(url, context, reuse_failure=True, user=chosen.from_user)
+        except users.DailyLimitReached as error:
+            try:
+                await status.fail(users.limit_reached_text(error))
+            except TelegramError:
+                pass
+            return
         status.follow(preparation.progress_of(task))
         try:
             cached_result = await task

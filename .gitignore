@@ -8,5 +8,6 @@ __pycache__/
 *.log
 .inline_cache.json
 .inline_cache.sqlite3*
+.users.sqlite3*
 downloads/
 cookies/

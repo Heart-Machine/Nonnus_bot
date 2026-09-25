@@ -242,6 +242,7 @@ def test_the_memory_of_resolved_links_is_bounded(monkeypatch):
 
 class Message:
     chat_id = 1
+    from_user = SimpleNamespace(id=1, username="someone", first_name="Someone")
 
     def __init__(self, text):
         self.text = text
@@ -285,6 +286,7 @@ def test_a_share_link_that_would_not_resolve_is_said_so(monkeypatch):
 class InlineQuery:
     def __init__(self, query):
         self.query = query
+        self.from_user = SimpleNamespace(id=1, username="someone", first_name="Someone")
         self.answers = []
 
     async def answer(self, results, **kwargs):

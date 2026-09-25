@@ -107,6 +107,7 @@ def test_an_incomplete_post_is_not_cached_and_the_user_is_told(monkeypatch):
 
     class Message:
         chat_id = 1
+        from_user = SimpleNamespace(id=1, username="someone", first_name="Someone")
 
         async def reply_text(self, text, **kwargs):
             return StatusMessage()
