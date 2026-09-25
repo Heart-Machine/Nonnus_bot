@@ -70,6 +70,16 @@ def test_any_bot_token_is_redacted_not_only_the_configured_one(log):
     assert OTHER_TOKEN not in log.getvalue()
 
 
+# The part before the colon is the bot's id, and it has grown with the number
+# of bots: older ones have 8 or 9 digits, new ones 10. The whole token goes,
+# the id included - not just the part of it a narrower pattern would reach.
+@pytest.mark.parametrize("bot_id", ["12345678", "123456789", "7123456789"])
+def test_a_token_is_redacted_whatever_the_length_of_the_bot_id(log, bot_id):
+    logging.getLogger("nonnus.test").warning("old token %s:AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsawQ here", bot_id)
+
+    assert "old token <BOT_TOKEN> here" in log.getvalue()
+
+
 def test_the_configured_token_is_redacted_whatever_its_shape(log, monkeypatch):
     monkeypatch.setattr(config, "BOT_TOKEN", "odd-shaped-secret")
     logging.getLogger("nonnus.test").warning("token odd-shaped-secret in a message")
