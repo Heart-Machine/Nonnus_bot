@@ -10,6 +10,27 @@ permissions:
   contents: read
   packages: write
 
+# Only the newest run waits for approval: merge three pull requests and one
+# approval ships all three. A run parked on required reviewers counts as in
+# progress rather than pending, so nothing short of cancel-in-progress
+# displaces it.
+#
+# The group is on the whole run, not on the deploy job, so runs displace each
+# other in the order of the pushes that started them. On the job it was the
+# order in which their builds finished: two pull requests merged seconds apart
+# built side by side, the newer one finished first and was waiting for
+# approval when the older one's deploy came in and cancelled it - the server
+# got the older commit.
+#
+# The price: a push cancels a run that is already deploying too - GitHub
+# cannot cancel only the ones still waiting. That leaves no lasting damage,
+# because the run that did the cancelling then deploys everything from
+# scratch once approved; the script rewrites every file it touches. Until then
+# the bot may be down, if the cut came during `docker compose up`.
+concurrency:
+  group: production-deploy
+  cancel-in-progress: true
+
 jobs:
   # The same checks a pull request has to pass, so a push straight to main
   # cannot reach the server without them.
@@ -64,20 +85,6 @@ jobs:
     runs-on: ubuntu-24.04
     needs: build
     environment: production
-    # Only the newest build waits for approval: merge three pull requests and
-    # one approval ships all three. A deploy parked on required reviewers
-    # counts as in progress rather than pending, so nothing short of
-    # cancel-in-progress displaces it.
-    #
-    # The price: a newer run that finishes building while this one is
-    # already deploying cancels it halfway too - GitHub cannot cancel only
-    # the ones still waiting. That leaves no lasting damage, because the run
-    # that did the cancelling then deploys everything from scratch once
-    # approved; the script rewrites every file it touches. Until then the
-    # bot may be down, if the cut came during `docker compose up`.
-    concurrency:
-      group: production-deploy
-      cancel-in-progress: true
     steps:
       - name: Deploy
         uses: appleboy/ssh-action@0ff4204d59e8e51228ff73bce53f80d53301dee2 # v1.2.5
