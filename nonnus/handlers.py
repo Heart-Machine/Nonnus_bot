@@ -264,30 +264,32 @@ async def _deliver_post(message, url: str, context: ContextTypes.DEFAULT_TYPE, s
         # running their own. Each of them follows its progress.
         task = preparation.get_or_create_prepare_task(url, context)
         status.follow(preparation.progress_of(task))
+        # A failed preparation's traceback is logged once, from the task
+        # itself; here, a line on what the user was told.
         try:
             cached_result = await task
         except instagram.NoMediaInPostError:
             logger.info("No downloadable media in post %s", url)
             await status.fail("В этой публикации нет ни видео, ни фото, которые я могу скачать.")
             return
-        except instagram.IncompletePostError:
-            logger.exception("Could not fetch all of %s", url)
+        except instagram.IncompletePostError as error:
+            logger.warning("Could not fetch all of %s: %s", url, preparation.describe_failure(error))
             await status.fail(INCOMPLETE_POST_TEXT)
             return
         except media.MediaTooLargeError as error:
-            logger.exception("Media too large for %s", url)
+            logger.warning("Media too large for %s: %s", url, preparation.describe_failure(error))
             await status.fail(too_large_text(error))
             return
-        except TelegramError:
+        except TelegramError as error:
             # The one thing in the preparation that talks to Telegram is the
             # upload to the storage chat, so the post itself came through.
             # Blaming it - private, deleted - would send the user looking in
             # the wrong place; the storage chat is what to check.
-            logger.exception("Failed to upload %s to the storage chat", url)
+            logger.warning("Failed to upload %s to the storage chat: %s", url, preparation.describe_failure(error))
             await status.fail(UPLOAD_FAILED_TEXT)
             return
-        except Exception:
-            logger.exception("Failed to prepare %s", url)
+        except Exception as error:
+            logger.warning("Failed to prepare %s: %s", url, preparation.describe_failure(error))
             await status.fail(
                 "Не получилось скачать публикацию. Возможно, она закрытая или удалена. "
                 "Если ссылка открывается в Instagram, попробуй ещё раз чуть позже."

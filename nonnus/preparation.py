@@ -125,21 +125,39 @@ async def prepare_inline_post(
 
     temp_dir = Path(tempfile.mkdtemp(prefix="ig_inline_"))
     try:
-        items, caption = await download_post_in_thread(url, temp_dir, context)
-        items, compressed = await prepare_items_in_thread(items, temp_dir)
-        caption = media.add_compression_note_if_needed(caption, compressed)
-        media.ensure_items_fit_telegram(items)
-
-        progress.report(progress.UPLOADING)
-        cached_result = {
-            "caption": caption,
-            "title": delivery.title_from_caption(caption),
-            "items": await delivery.upload_items_to_storage(context, items, caption),
-        }
-        cache.save_cached_inline_result(url, cached_result)
-        return cached_result
+        return await _prepare(url, context, temp_dir)
+    except Exception as error:
+        # A failed preparation is logged in full once, by the application's
+        # error handler, which knows nothing of the post; the note puts the
+        # link into that traceback. Everyone waiting on the task logs a line.
+        error.add_note(f"While preparing {url}")
+        raise
     finally:
         shutil.rmtree(temp_dir, ignore_errors=True)
+
+
+async def _prepare(url: str, context: ContextTypes.DEFAULT_TYPE, temp_dir: Path) -> dict[str, Any]:
+    items, caption = await download_post_in_thread(url, temp_dir, context)
+    items, compressed = await prepare_items_in_thread(items, temp_dir)
+    caption = media.add_compression_note_if_needed(caption, compressed)
+    media.ensure_items_fit_telegram(items)
+
+    progress.report(progress.UPLOADING)
+    cached_result = {
+        "caption": caption,
+        "title": delivery.title_from_caption(caption),
+        "items": await delivery.upload_items_to_storage(context, items, caption),
+    }
+    cache.save_cached_inline_result(url, cached_result)
+    return cached_result
+
+
+def describe_failure(error: BaseException) -> str:
+    """One line for a failure whose traceback is already in the log - yt-dlp's
+    messages run to a paragraph."""
+    text = str(error).strip()
+    first_line = text.splitlines()[0] if text else ""
+    return f"{type(error).__name__}: {first_line[:200]}"
 
 
 # The progress of each running preparation, by its task. Weak, so a task's

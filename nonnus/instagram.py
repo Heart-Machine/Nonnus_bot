@@ -1,6 +1,7 @@
 """Fetching a post from Instagram with yt-dlp: probing it, downloading its
 videos and photos, the cookies and the fallback without them, and the caption."""
 
+import copy
 import http.client
 import logging
 from html import escape
@@ -287,18 +288,29 @@ def build_ydl_opts(download_dir: Path, use_cookies: bool = True) -> dict[str, An
 
 
 def probe_post(url: str, download_dir: Path, use_cookies: bool = True) -> dict[str, Any]:
-    """Metadata-only pass over the post.
+    """The one request to Instagram's API for a post: what the extractor
+    returns, unprocessed.
+
+    Unprocessed, because this is also what the videos are downloaded from
+    (download_post_videos), and processing picks a format - yt-dlp's default
+    one here, which a later pass would keep rather than apply ours. The raw
+    result has everything used from it: the entries, their formats and
+    thumbnails, the author.
 
     yt-dlp builds no `formats` for Instagram photos - their URLs only ever
-    surface as thumbnails - so a plain download run dies with "No video
-    formats found" on any post that isn't pure video. ignore_no_formats_error
-    lets those entries through, which is what makes photo posts and mixed
-    carousels visible to us at all."""
+    surface as thumbnails. Processing a photo entry would die with "No video
+    formats found"; unprocessed, and with ignore_no_formats_error should
+    anything process it, photo posts and mixed carousels come through."""
     ydl_opts = build_ydl_opts(download_dir, use_cookies)
     ydl_opts["ignore_no_formats_error"] = True
 
     with YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(url, download=False)
+        info = ydl.extract_info(url, download=False, process=False)
+
+    if info and info.get("entries") is not None:
+        # A generator would be used up by the first look at the entries,
+        # leaving nothing for the video pass.
+        info["entries"] = list(info["entries"])
 
     if not info:
         raise NoMediaInPostError("Instagram returned nothing for this post")
@@ -314,12 +326,9 @@ def with_cookie_fallback(url: str, attempt: Callable[[bool], T]) -> Tuple[T, boo
     trusted, and again without them when that fails. Returns the result and
     whether the cookies were used.
 
-    Both yt-dlp passes over a post go through this, not only the first,
-    because Instagram does not answer a dead session the same way twice.
-    Sometimes yt-dlp spots the redirect to the login page and quietly drops
-    the cookies itself; sometimes it gets an empty page and fails on the JSON.
-    So the probe can come through on the cookies and the video pass right
-    after it still fail on them."""
+    Only the probe goes through this - it is the one request to Instagram's
+    API a post takes. The videos are downloaded from what the probe returned,
+    straight from the CDN, with nothing for the cookies to be turned down on."""
     if not INSTAGRAM_SESSION.use_cookies():
         return attempt(False), False
 
@@ -381,17 +390,26 @@ def downloaded_entry_path(entry: dict[str, Any]) -> Optional[Path]:
 
 
 def download_post_videos(
-    url: str,
+    info: dict[str, Any],
     download_dir: Path,
     entries: list[dict[str, Any]],
     video_indices: list[int],
     use_cookies: bool = True,
 ) -> dict[int, Path]:
-    """Download only the carousel positions that actually carry a video.
+    """Download only the carousel positions that actually carry a video, from
+    the probe's result rather than by asking Instagram's API again.
+
+    That second request used to be how this worked, and on a server it was a
+    second chance for Instagram to answer with nothing: the probe came
+    through, and a second later the same post came back as "an empty media
+    response". From the probe's result it is one request per post, and the
+    files come from the CDN URLs already in it.
 
     playlist_items is 1-based and keeps the photo entries out of the run
     entirely, so the format selector never has to cope with an entry that has
-    no formats at all. Returns a map from carousel position to file."""
+    no formats at all. The result is processed from a copy, since processing
+    writes into it and the caller still reads the photos from the original.
+    Returns a map from carousel position to file."""
     ydl_opts = build_ydl_opts(download_dir, use_cookies)
     ydl_opts["format"] = (
         "bestvideo[vcodec^=avc1][ext=mp4]+bestaudio[ext=m4a]/"
@@ -403,12 +421,12 @@ def download_post_videos(
         ydl_opts["playlist_items"] = ",".join(str(index + 1) for index in video_indices)
 
     with YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(url, download=True)
+        result = ydl.process_ie_result(copy.deepcopy(info), download=True)
 
     # The download pass returns the selected entries in the order we asked
     # for them, so position N of the result is carousel item video_indices[N].
     video_paths: dict[int, Path] = {}
-    for position, entry in enumerate(post_entries(info or {})):
+    for position, entry in enumerate(post_entries(result or {})):
         if position >= len(video_indices):
             break
 
@@ -571,21 +589,11 @@ def download_post(url: str, download_dir: Path) -> Tuple[list[media.MediaItem], 
     video_indices = [index for index, entry in enumerate(entries) if entry_has_video(entry)]
     video_paths: dict[int, Path] = {}
     if video_indices:
-        if probe_used_cookies:
-            # The probe came through on the cookies, but this pass gets its
-            # own fallback all the same, for the reason given in
-            # with_cookie_fallback.
-            video_paths, _ = with_cookie_fallback(
-                url,
-                lambda use_cookies: download_post_videos(url, download_dir, entries, video_indices, use_cookies),
-            )
-        else:
-            # The post was served logged-out - the cookies turned down, set
-            # aside, or never there - so its videos are fetched the same way,
-            # not with cookies that just failed on it. Retrying them here would
-            # only cost a request and count against them a second time for
-            # what is one post.
-            video_paths = download_post_videos(url, download_dir, entries, video_indices, use_cookies=False)
+        # From the probe's result, the way the probe got it: with the
+        # cookies if it came through on them, without if it was served
+        # logged-out. No request to the API, so nothing to fall back from -
+        # and a post counts against the cookies once, not twice.
+        video_paths = download_post_videos(info, download_dir, entries, video_indices, use_cookies=probe_used_cookies)
 
     # The videos come down in one yt-dlp run, the photos one by one after it,
     # so that is how the count moves.
