@@ -22,11 +22,13 @@ permissions:
 # approval when the older one's deploy came in and cancelled it - the server
 # got the older commit.
 #
-# The price: a push cancels a run that is already deploying too - GitHub
-# cannot cancel only the ones still waiting. That leaves no lasting damage,
-# because the run that did the cancelling then deploys everything from
-# scratch once approved; the script rewrites every file it touches. Until then
-# the bot may be down, if the cut came during `docker compose up`.
+# What a new push does to the run before it, as a throwaway workflow showed:
+# a job that has not started yet is cancelled within a second of the push
+# (tried on one waiting for a runner; a deploy parked on approval has not
+# started either); a job already running is not cut off, but finishes, and
+# the run is cancelled before its next job, the new run waiting meanwhile.
+# So a push during a deploy lets it complete, then ships itself after
+# approval.
 concurrency:
   group: production-deploy
   cancel-in-progress: true
