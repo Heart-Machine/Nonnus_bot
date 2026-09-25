@@ -1,6 +1,7 @@
 """Wiring the handlers into the application."""
 
 import logging
+import re
 from typing import Any
 
 from telegram import BotCommand, Update
@@ -18,10 +19,50 @@ from telegram.ext import (
 from nonnus import config, inline, handlers, canary
 
 
-logging.basicConfig(
-    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-    level=logging.INFO,
-)
+LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s: %(message)s"
+
+# A Telegram bot token: the bot's numeric id, a colon, and 35 characters of
+# secret. It travels in the URL of every Bot API request - /bot<token>/method -
+# so anything that logs a URL logs the token with it.
+BOT_TOKEN_RE = re.compile(r"\d{5,}:[A-Za-z0-9_-]{30,}")
+REDACTED_TOKEN = "<BOT_TOKEN>"
+
+
+def redact(text: str) -> str:
+    text = BOT_TOKEN_RE.sub(REDACTED_TOKEN, text)
+    # The configured token too, whatever its shape, in case one ever does not
+    # match the pattern.
+    if config.BOT_TOKEN:
+        text = text.replace(config.BOT_TOKEN, REDACTED_TOKEN)
+    return text
+
+
+class RedactingFormatter(logging.Formatter):
+    """Formats a record as usual, then takes bot tokens out of the result -
+    the message, its arguments and any traceback alike, since it works on the
+    finished line rather than on any one part of the record."""
+
+    def format(self, record: logging.LogRecord) -> str:
+        return redact(super().format(record))
+
+
+def configure_logging() -> None:
+    """Log to stderr, without the bot token.
+
+    httpx, which python-telegram-bot sends its requests through, logs every
+    one at INFO - URL, token and all, a line for every poll of getUpdates.
+    Those lines go: WARNING is where httpx has something to say. The
+    formatter is the backstop for a token turning up anywhere else, such as
+    in the text of a network error.
+
+    Called from main() rather than on import, so that importing the package -
+    in the tests, in the image build check - leaves the logging setup of
+    whoever imports it alone."""
+    handler = logging.StreamHandler()
+    handler.setFormatter(RedactingFormatter(LOG_FORMAT))
+    logging.basicConfig(level=logging.INFO, handlers=[handler], force=True)
+    for chatty in ("httpx", "httpcore"):
+        logging.getLogger(chatty).setLevel(logging.WARNING)
 
 
 logger = logging.getLogger(__name__)
@@ -122,6 +163,7 @@ def build_application(token: str) -> Application:
 
 
 def main() -> None:
+    configure_logging()
     if not config.BOT_TOKEN:
         raise RuntimeError("Set BOT_TOKEN in .env or environment variables")
 
