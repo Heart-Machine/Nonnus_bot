@@ -98,7 +98,32 @@ def test_a_burst_of_inline_queries_uploads_the_placeholder_once(monkeypatch):
     )
 
     async def burst():
-        return await asyncio.gather(*(inline.get_placeholder_photo_file_id(context) for _ in range(5)))
+        return await asyncio.gather(*(inline.get_placeholder_photo_file_id(context, "post") for _ in range(5)))
 
     assert asyncio.run(burst()) == ["placeholder"] * 5
     assert len(uploads) == 1
+
+
+def test_each_kind_of_placeholder_is_uploaded_once_with_its_own_picture(monkeypatch):
+    monkeypatch.setattr(config, "STORAGE_CHAT_ID", "-100")
+    monkeypatch.setattr(inline, "PLACEHOLDER_UPLOAD_LOCK", asyncio.Lock())
+    uploads = []
+
+    async def send_photo(**kwargs):
+        uploads.append(kwargs["photo"])
+        return SimpleNamespace(photo=[SimpleNamespace(file_id=f"placeholder-{len(uploads)}")])
+
+    context = SimpleNamespace(
+        application=SimpleNamespace(bot_data={}),
+        bot=SimpleNamespace(send_photo=send_photo),
+    )
+
+    async def ask():
+        return [await inline.get_placeholder_photo_file_id(context, kind) for kind in ("reel", "post", "reel", "post")]
+
+    file_ids = asyncio.run(ask())
+
+    # One upload per kind, each with its own picture, and each kind's file_id
+    # handed back to it from then on - not the other kind's.
+    assert uploads == [inline.PLACEHOLDERS["reel"].image, inline.PLACEHOLDERS["post"].image]
+    assert file_ids == ["placeholder-1", "placeholder-2", "placeholder-1", "placeholder-2"]

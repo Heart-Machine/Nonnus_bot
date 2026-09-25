@@ -215,7 +215,7 @@ class InlineQuery:
 
 @pytest.fixture
 def placeholder(monkeypatch):
-    async def placeholder_file_id(context):
+    async def placeholder_file_id(context, kind):
         return "placeholder"
 
     monkeypatch.setattr(inline, "get_placeholder_photo_file_id", placeholder_file_id)
