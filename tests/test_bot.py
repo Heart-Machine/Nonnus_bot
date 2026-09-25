@@ -209,9 +209,11 @@ def test_post_entries_handles_a_lazy_entries_iterable():
 
 class FakeYoutubeDL:
     """Stands in for yt-dlp so download_post_videos can be checked without a
-    network round trip. Records the options it was handed."""
+    network round trip. Records the options it was handed and the result it
+    was given to process; asking the API again fails the test."""
 
     captured_opts: list[dict] = []
+    processed: list[dict] = []
     result: dict = {}
 
     def __init__(self, ydl_opts):
@@ -223,14 +225,25 @@ class FakeYoutubeDL:
     def __exit__(self, *exc_info):
         return False
 
-    def extract_info(self, url, download):
+    def extract_info(self, url, download, **kwargs):
+        raise AssertionError("the video pass must not ask Instagram's API again")
+
+    def process_ie_result(self, info, download):
         assert download is True
+        # Processing writes into what it is given, as yt-dlp does.
+        info["requested_downloads"] = [{"filepath": "written by processing"}]
+        type(self).processed.append(info)
         return type(self).result
+
+
+# What the probe returned, handed on to the video pass.
+PROBED = {"id": "post", "entries": []}
 
 
 @pytest.fixture
 def fake_ydl(monkeypatch):
     FakeYoutubeDL.captured_opts = []
+    FakeYoutubeDL.processed = []
     FakeYoutubeDL.result = {}
     monkeypatch.setattr(instagram, "YoutubeDL", FakeYoutubeDL)
     return FakeYoutubeDL
@@ -250,7 +263,7 @@ def test_download_post_videos_maps_results_onto_carousel_positions(fake_ydl, tmp
     }
     entries = [photo_entry("a"), video_entry("b"), photo_entry("c"), video_entry("d"), photo_entry("e")]
 
-    video_paths = instagram.download_post_videos("https://x/", tmp_path, entries, [1, 3])
+    video_paths = instagram.download_post_videos(PROBED, tmp_path, entries, [1, 3])
 
     assert video_paths == {1: second, 3: fourth}
     # playlist_items is 1-based, so positions 1 and 3 are items 2 and 4.
@@ -262,10 +275,65 @@ def test_download_post_videos_skips_playlist_items_for_a_single_medium_post(fake
     only.write_bytes(b"video")
     fake_ydl.result = {"id": "a", "requested_downloads": [{"filepath": str(only)}]}
 
-    video_paths = instagram.download_post_videos("https://x/", tmp_path, [video_entry("a")], [0])
+    video_paths = instagram.download_post_videos(PROBED, tmp_path, [video_entry("a")], [0])
 
     assert video_paths == {0: only}
     assert "playlist_items" not in fake_ydl.captured_opts[0]
+
+
+def test_download_post_videos_works_from_the_probe_result_without_changing_it(fake_ydl, tmp_path):
+    # One request to the API per post: the videos come from what the probe
+    # returned. It is processed from a copy - processing writes into it, and
+    # the photos are still read from the original afterwards.
+    probed = {"id": "post", "entries": [video_entry("a"), photo_entry("b")]}
+
+    instagram.download_post_videos(probed, tmp_path, probed["entries"], [0])
+
+    assert fake_ydl.processed[0] == {**probed, "requested_downloads": [{"filepath": "written by processing"}]}
+    assert "requested_downloads" not in probed
+
+
+class FakeProbe:
+    """yt-dlp for probe_post: records how extract_info was called."""
+
+    calls: list = []
+    result: dict = {}
+
+    def __init__(self, ydl_opts):
+        pass
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc_info):
+        return False
+
+    def extract_info(self, url, **kwargs):
+        type(self).calls.append(kwargs)
+        return type(self).result
+
+
+def test_the_probe_leaves_the_result_unprocessed(monkeypatch, tmp_path):
+    # Processed, it would carry yt-dlp's default format choice, which the
+    # video pass keeps instead of applying its own - checked against the
+    # real yt-dlp: the picks stayed those of the probe.
+    FakeProbe.calls, FakeProbe.result = [], {"id": "a"}
+    monkeypatch.setattr(instagram, "YoutubeDL", FakeProbe)
+
+    instagram.probe_post("https://www.instagram.com/p/ABC123/", tmp_path, use_cookies=False)
+
+    assert FakeProbe.calls == [{"download": False, "process": False}]
+
+
+def test_the_probe_turns_entries_into_a_list(monkeypatch, tmp_path):
+    # Unprocessed, entries may be a generator, used up by the first look.
+    FakeProbe.calls, FakeProbe.result = [], {"entries": (entry for entry in [video_entry("a"), photo_entry("b")])}
+    monkeypatch.setattr(instagram, "YoutubeDL", FakeProbe)
+
+    info = instagram.probe_post("https://www.instagram.com/p/ABC123/", tmp_path, use_cookies=False)
+
+    assert len(instagram.post_entries(info)) == 2
+    assert len(instagram.post_entries(info)) == 2
 
 
 def test_download_post_videos_falls_back_to_the_largest_video_file(fake_ydl, tmp_path):
@@ -277,7 +345,7 @@ def test_download_post_videos_falls_back_to_the_largest_video_file(fake_ydl, tmp
     # yt-dlp reported no filepath at all.
     fake_ydl.result = {"id": "a"}
 
-    video_paths = instagram.download_post_videos("https://x/", tmp_path, [video_entry("a")], [0])
+    video_paths = instagram.download_post_videos(PROBED, tmp_path, [video_entry("a")], [0])
 
     # The cookie file shares the directory and must not be mistaken for media.
     assert video_paths == {0: biggest}

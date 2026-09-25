@@ -237,7 +237,7 @@ def test_the_video_pass_takes_the_route_the_probe_took(monkeypatch, session, tmp
     )
     routes = []
 
-    def download_post_videos(url, download_dir, entries, video_indices, use_cookies=True):
+    def download_post_videos(info, download_dir, entries, video_indices, use_cookies=True):
         routes.append(use_cookies)
         video = download_dir / "v.mp4"
         video.write_bytes(b"video")
@@ -253,21 +253,17 @@ def test_the_video_pass_takes_the_route_the_probe_took(monkeypatch, session, tmp
     assert session.use_cookies() is True
 
 
-def test_the_video_pass_falls_back_on_its_own(monkeypatch, session, tmp_path):
-    # Instagram does not answer a dead session the same way twice: the probe
-    # can come through on the cookies - yt-dlp quietly dropping them itself -
-    # and the video pass right after still fail on them.
-    fake_probe(
-        monkeypatch,
-        with_cookies={"entries": [{"id": "v", "formats": [{"url": "https://cdn/v.mp4"}]}]},
-        without_cookies=AssertionError("not reached"),
-    )
-    routes = []
+def test_the_video_pass_goes_the_way_the_probe_came_through(monkeypatch, session, tmp_path):
+    # With the cookies, when the probe came through on them - and from the
+    # probe's own result, so there is no second API request for Instagram to
+    # answer differently: that used to be where "an empty media response"
+    # struck, a second after the probe had worked.
+    probed = {"entries": [{"id": "v", "formats": [{"url": "https://cdn/v.mp4"}]}]}
+    fake_probe(monkeypatch, with_cookies=probed, without_cookies=AssertionError("not reached"))
+    calls = []
 
-    def download_post_videos(url, download_dir, entries, video_indices, use_cookies=True):
-        routes.append(use_cookies)
-        if use_cookies:
-            raise DownloadError("ERROR: [Instagram] v: Failed to parse JSON")
+    def download_post_videos(info, download_dir, entries, video_indices, use_cookies=True):
+        calls.append((info, use_cookies))
         video = download_dir / "v.mp4"
         video.write_bytes(b"video")
         return {0: video}
@@ -276,14 +272,31 @@ def test_the_video_pass_falls_back_on_its_own(monkeypatch, session, tmp_path):
     monkeypatch.setattr(media, "ensure_h264_video", lambda path, work_dir: path)
     monkeypatch.setattr(media, "add_audio_warning_if_needed", lambda caption, path: caption)
 
-    items, _ = instagram.download_post("https://www.instagram.com/p/ABC123/", tmp_path)
+    instagram.download_post("https://www.instagram.com/p/ABC123/", tmp_path)
 
-    assert routes == [True, False]
-    assert [item.kind for item in items] == ["video"]
-    # The probe worked on the cookies and the video pass did not: one
-    # rejection, not two in a row.
+    assert calls == [(probed, True)]
+
+
+def test_a_failing_video_pass_is_not_held_against_the_cookies(monkeypatch, session, tmp_path):
+    # The video pass fetches files from the CDN, not the API: its failure says
+    # nothing about the session, and nothing is retried without the cookies.
+    fake_probe(
+        monkeypatch,
+        with_cookies={"entries": [{"id": "v", "formats": [{"url": "https://cdn/v.mp4"}]}]},
+        without_cookies=AssertionError("not reached"),
+    )
+
+    def download_post_videos(info, download_dir, entries, video_indices, use_cookies=True):
+        raise DownloadError("ERROR: unable to download video data: HTTP Error 403")
+
+    monkeypatch.setattr(instagram, "download_post_videos", download_post_videos)
+
+    with pytest.raises(DownloadError):
+        instagram.download_post("https://www.instagram.com/p/ABC123/", tmp_path)
+
+    session.mark_rejected()
+    # One rejection from here on is the first in a row, not the second.
     assert session.use_cookies() is True
-    assert session.take_alert() is False
 
 
 # --- yt-dlp options -------------------------------------------------------

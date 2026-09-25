@@ -345,8 +345,10 @@ async def handle_inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE
                 is_personal=True,
             )
             return
-        except Exception:
-            logger.exception("Failed to prepare inline result for %s", url)
+        except Exception as error:
+            # The traceback is in the log once already, from the preparation;
+            # this runs again on every keystroke of the query.
+            logger.info("Answering the inline query for %s with its failed preparation: %s", url, preparation.describe_failure(error))
             await inline_query.answer(
                 [
                     build_inline_article(
@@ -417,8 +419,8 @@ async def handle_chosen_inline_result(update: Update, context: ContextTypes.DEFA
         task = preparation.get_or_create_prepare_task(url, context, reuse_failure=True)
         try:
             cached_result = await task
-        except Exception:
-            logger.exception("Failed to prepare inline result for %s after chosen_inline_result", url)
+        except Exception as error:
+            logger.warning("Could not prepare %s for the chosen placeholder: %s", url, preparation.describe_failure(error))
             try:
                 await context.bot.edit_message_caption(
                     inline_message_id=chosen.inline_message_id,
