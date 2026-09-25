@@ -3,6 +3,7 @@ post is prepared, and swapping it for the real media once chosen."""
 
 import logging
 import asyncio
+from dataclasses import dataclass
 import hashlib
 from html import escape
 from typing import Any, Optional
@@ -32,20 +33,42 @@ logger = logging.getLogger(__name__)
 PLACEHOLDER_UPLOAD_LOCK = asyncio.Lock()
 
 
-# A small placeholder photo (assets/inline_placeholder.jpg: a download
-# icon plus "Готовлю видео..." caption text) shown as the inline result
-# while a Reel is being downloaded, so the query doesn't have to be
-# retyped once it's ready. Note: InlineQueryResultCachedPhoto's
-# title/description fields are NOT rendered by any major Telegram client
-# for photo-type inline results (confirmed via python-telegram-bot#2115
-# and telegramdesktop/tdesktop#7310) - the only text/graphics that
-# actually show up are whatever is baked into the image itself, which is
-# why this is a drawn icon rather than relying on API metadata fields.
+# What stands in for a post in inline mode while it is prepared, so the query
+# does not have to be typed again once the post is ready. Which one is picked
+# by what the link says: a /reel/ link is a reel, anything else is a post.
+#
+# The text is drawn on the picture because that is all a client shows of a
+# photo result in the list: InlineQueryResultCachedPhoto's title and
+# description are not rendered by any major Telegram client
+# (python-telegram-bot#2115, telegramdesktop/tdesktop#7310). The caption is
+# seen once the placeholder is sent, until the progress replaces it.
 # See get_placeholder_photo_file_id() and handle_chosen_inline_result().
-INLINE_PLACEHOLDER_IMAGE_PATH = config.BASE_DIR / "assets" / "inline_placeholder.jpg"
+@dataclass(frozen=True)
+class Placeholder:
+    image: bytes
+    title: str
+    description: str
+    caption: str
 
 
-INLINE_PLACEHOLDER_IMAGE_BYTES = INLINE_PLACEHOLDER_IMAGE_PATH.read_bytes()
+PLACEHOLDERS = {
+    "reel": Placeholder(
+        image=(config.BASE_DIR / "assets" / "inline_placeholder_reel.jpg").read_bytes(),
+        title="Готовлю рилс...",
+        description="Нажми, чтобы отправить — рилс появится тут сам через несколько секунд",
+        caption="Готовлю рилс, подожди немного — сообщение обновится само...",
+    ),
+    "post": Placeholder(
+        image=(config.BASE_DIR / "assets" / "inline_placeholder_post.jpg").read_bytes(),
+        title="Готовлю пост...",
+        description="Нажми, чтобы отправить — пост появится тут сам через несколько секунд",
+        caption="Готовлю пост, подожди немного — сообщение обновится само...",
+    ),
+}
+
+
+def placeholder_kind(url: str) -> str:
+    return "reel" if links.is_reel_link(url) else "post"
 
 
 def inline_result_id(url: str) -> str:
@@ -196,12 +219,13 @@ def build_inline_article(result_id: str, title: str, description: str, message_t
     )
 
 
-async def get_placeholder_photo_file_id(context: ContextTypes.DEFAULT_TYPE) -> Optional[str]:
-    """Upload the "Готовлю видео..." placeholder image to the storage chat
-    once per bot run and cache its file_id, so every not-yet-ready inline
-    query can reuse it as InlineQueryResultCachedPhoto instead of re-sending
-    the bytes each time."""
-    file_id = context.application.bot_data.get("placeholder_photo_file_id")
+async def get_placeholder_photo_file_id(context: ContextTypes.DEFAULT_TYPE, kind: str) -> Optional[str]:
+    """Upload the placeholder image of this kind to the storage chat once per
+    bot run and cache its file_id, so every not-yet-ready inline query can
+    reuse it as InlineQueryResultCachedPhoto instead of re-sending the bytes
+    each time."""
+    file_ids = context.application.bot_data.setdefault("placeholder_photo_file_ids", {})
+    file_id = file_ids.get(kind)
     if file_id:
         return file_id
 
@@ -212,14 +236,14 @@ async def get_placeholder_photo_file_id(context: ContextTypes.DEFAULT_TYPE) -> O
     # so a burst of them could find no file_id and each upload the image.
     # The first one uploads; the rest wait and reuse its file_id.
     async with PLACEHOLDER_UPLOAD_LOCK:
-        file_id = context.application.bot_data.get("placeholder_photo_file_id")
+        file_id = file_ids.get(kind)
         if file_id:
             return file_id
 
         try:
             sent_message = await context.bot.send_photo(
                 chat_id=delivery.parse_storage_chat_id(),
-                photo=INLINE_PLACEHOLDER_IMAGE_BYTES,
+                photo=PLACEHOLDERS[kind].image,
             )
         except TelegramError:
             logger.exception("Failed to upload inline placeholder photo")
@@ -229,11 +253,8 @@ async def get_placeholder_photo_file_id(context: ContextTypes.DEFAULT_TYPE) -> O
             return None
 
         file_id = sent_message.photo[-1].file_id
-        context.application.bot_data["placeholder_photo_file_id"] = file_id
+        file_ids[kind] = file_id
         return file_id
-
-
-PLACEHOLDER_CAPTION = "Готовлю видео, подожди немного — сообщение обновится само..."
 
 
 def placeholder_keyboard(url: str) -> InlineKeyboardMarkup:
@@ -241,17 +262,18 @@ def placeholder_keyboard(url: str) -> InlineKeyboardMarkup:
 
 
 def build_inline_placeholder_result(url: str, photo_file_id: str) -> InlineQueryResultCachedPhoto:
-    """A placeholder inline result shown while a Reel is being prepared. It
+    """A placeholder inline result shown while a post is being prepared. It
     carries a reply_markup so Telegram is guaranteed to report an
     inline_message_id in chosen_inline_result, which handle_chosen_inline_result
-    then uses to swap this placeholder for the real video once it's ready -
+    then uses to swap this placeholder for the real post once it's ready -
     no need for the user to retype the query."""
+    placeholder = PLACEHOLDERS[placeholder_kind(url)]
     return InlineQueryResultCachedPhoto(
         id=inline_result_id(url),
         photo_file_id=photo_file_id,
-        title="Готовлю видео...",
-        description="Нажми, чтобы отправить — видео появится тут само через несколько секунд",
-        caption=PLACEHOLDER_CAPTION,
+        title=placeholder.title,
+        description=placeholder.description,
+        caption=placeholder.caption,
         reply_markup=placeholder_keyboard(url),
     )
 
@@ -371,7 +393,8 @@ async def handle_inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE
         await inline_query.answer(build_inline_results(url, cached_result, await delivery.get_bot_username(context)), cache_time=0, is_personal=True)
         return
 
-    placeholder_photo_file_id = await get_placeholder_photo_file_id(context)
+    kind = placeholder_kind(url)
+    placeholder_photo_file_id = await get_placeholder_photo_file_id(context, kind)
     if placeholder_photo_file_id:
         await inline_query.answer(
             [build_inline_placeholder_result(url, placeholder_photo_file_id)],
@@ -383,9 +406,9 @@ async def handle_inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE
             [
                 build_inline_article(
                     inline_result_id(url),
-                    "Готовлю видео...",
+                    PLACEHOLDERS[kind].title,
                     "Через несколько секунд повтори inline-запрос",
-                    "Видео готовится. Повтори inline-запрос через несколько секунд.",
+                    "Публикация готовится. Повтори inline-запрос через несколько секунд.",
                 )
             ],
             cache_time=0,
@@ -425,7 +448,7 @@ async def handle_chosen_inline_result(update: Update, context: ContextTypes.DEFA
         # Meanwhile the placeholder's caption shows how the preparation goes,
         # as the status message under a link sent to the bot does.
         status = status_message.PlaceholderStatus(
-            context.bot, chosen.inline_message_id, PLACEHOLDER_CAPTION, placeholder_keyboard(url)
+            context.bot, chosen.inline_message_id, PLACEHOLDERS[placeholder_kind(url)].caption, placeholder_keyboard(url)
         )
         status.follow(preparation.progress_of(task))
         try:

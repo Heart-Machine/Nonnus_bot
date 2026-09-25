@@ -57,6 +57,18 @@ def normalize_post_url(url: str) -> str:
     return f"https://www.instagram.com{path}"
 
 
+# The post types that are a single video, whatever the post. A /p/ link says
+# nothing of the kind: it can be photos, a carousel or a video.
+REEL_POST_TYPES = ("reel", "reels", "tv")
+
+
+def is_reel_link(url: str) -> bool:
+    """Whether the link alone says the post is a reel. It is all there is to
+    go on before Instagram has been asked."""
+    parts = [part for part in urlparse(normalize_post_url(url)).path.split("/") if part]
+    return len(parts) == 2 and parts[0] in REEL_POST_TYPES
+
+
 # Telegram caps the parameter of a /start deep link at 64 characters.
 START_PAYLOAD_MAX_LENGTH = 64
 

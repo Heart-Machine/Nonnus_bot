@@ -25,7 +25,7 @@ def failing_post(monkeypatch):
     def download_post(url, download_dir):
         raise RuntimeError(YT_DLP_ERROR)
 
-    async def placeholder(context):
+    async def placeholder(context, kind):
         return "placeholder"
 
     async def no_alert(context):
