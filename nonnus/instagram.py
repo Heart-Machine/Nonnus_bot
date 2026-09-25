@@ -39,6 +39,14 @@ def post_label(items: list[media.MediaItem]) -> str:
     return "Рилс" if len(items) == 1 and items[0].is_video else "Пост"
 
 
+def post_kind(total: int, has_video: bool) -> str:
+    """What the post is, for the progress: known from the probe, before any
+    file is down. The same call post_label makes from the files afterwards."""
+    if total > 1:
+        return progress.CAROUSEL
+    return progress.REEL if has_video else progress.PHOTO
+
+
 def build_post_caption(info: dict[str, Any], fallback_url: str, label: str = "Пост") -> str:
     post_url = info.get("webpage_url") or fallback_url
     author = next(
@@ -585,8 +593,9 @@ def download_post(url: str, download_dir: Path) -> Tuple[list[media.MediaItem], 
         raise NoMediaInPostError("This Instagram post has no downloadable media.")
 
     total = len(entries)
-    progress.report(progress.DOWNLOADING, 0, total)
     video_indices = [index for index, entry in enumerate(entries) if entry_has_video(entry)]
+    kind = post_kind(total, bool(video_indices))
+    progress.report(progress.DOWNLOADING, 0, total, kind)
     video_paths: dict[int, Path] = {}
     if video_indices:
         # From the probe's result, the way the probe got it: with the
@@ -598,7 +607,7 @@ def download_post(url: str, download_dir: Path) -> Tuple[list[media.MediaItem], 
     # The videos come down in one yt-dlp run, the photos one by one after it,
     # so that is how the count moves.
     done = len(video_paths)
-    progress.report(progress.DOWNLOADING, done, total)
+    progress.report(progress.DOWNLOADING, done, total, kind)
     items: list[media.MediaItem] = []
     missing: list[int] = []
     for index, entry in enumerate(entries):
@@ -618,7 +627,7 @@ def download_post(url: str, download_dir: Path) -> Tuple[list[media.MediaItem], 
 
         items.append(media.MediaItem(media.prepare_photo_for_upload(photo_path, download_dir), "photo"))
         done += 1
-        progress.report(progress.DOWNLOADING, done, total)
+        progress.report(progress.DOWNLOADING, done, total, kind)
 
     if missing:
         positions = ", ".join(str(index + 1) for index in missing)
