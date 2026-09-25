@@ -5,16 +5,14 @@ import logging
 import re
 import shutil
 import tempfile
-import time
 from pathlib import Path
-from typing import Optional
 
 from telegram import Update
 from telegram.constants import ChatAction, ParseMode
 from telegram.error import NetworkError, TelegramError, TimedOut
 from telegram.ext import ContextTypes
 
-from nonnus import config, links, media, instagram, cache, delivery, preparation, progress
+from nonnus import config, links, media, instagram, cache, delivery, preparation, progress, status_message
 
 
 logger = logging.getLogger(__name__)
@@ -43,95 +41,6 @@ SHARE_LINK_UNRESOLVED_TEXT = (
     "Не получилось понять, на какой пост ведёт эта ссылка: Instagram не ответил. "
     "Пришли обычную ссылку на пост - в Instagram это «Копировать ссылку»."
 )
-
-
-DOWNLOADING_TEXT = "Скачиваю публикацию..."
-
-
-def progress_text(stage: str, done: int = 0, total: int = 0) -> str:
-    if stage == progress.QUEUED:
-        return "Жду своей очереди: сейчас скачиваются другие публикации..."
-    if stage == progress.COMPRESSING:
-        return "Видео большое, сжимаю перед отправкой..."
-    if stage == progress.UPLOADING:
-        return "Загружаю в Telegram..."
-    if total > 1:
-        return f"Скачиваю публикацию: {done} из {total}..."
-    return DOWNLOADING_TEXT
-
-
-# The least time between two edits of a status message. Telegram limits how
-# often a message can be edited, and a count ticking up every half second is
-# no more use than one every two.
-STATUS_EDIT_INTERVAL_SECONDS = 2.0
-
-
-class StatusMessage:
-    """The "Скачиваю публикацию..." message under a link: kept up to date while
-    the post is prepared, then settled once - deleted when the post has gone
-    out, or turned into what went wrong.
-
-    Progress edits are thinned out to one per STATUS_EDIT_INTERVAL_SECONDS,
-    latest text winning, and run in the background so that the preparation
-    never waits on one. Settling cancels whatever edit is still pending, so a
-    late "3 из 10" cannot overwrite the error it was followed by."""
-
-    def __init__(self, message, text: str) -> None:
-        self._message = message
-        self._shown = text
-        self._wanted = text
-        self._last_edit = time.monotonic()
-        self._pending: Optional[asyncio.Task] = None
-        self._settled = False
-
-    @classmethod
-    async def send(cls, reply_to, text: str = DOWNLOADING_TEXT) -> "StatusMessage":
-        return cls(await reply_to.reply_text(text), text)
-
-    def show(self, text: str) -> None:
-        if self._settled:
-            return
-        self._wanted = text
-        if self._pending is None or self._pending.done():
-            self._pending = asyncio.get_running_loop().create_task(self._edit_when_due())
-
-    def follow(self, tracker: Optional[progress.Progress]) -> None:
-        if tracker is not None:
-            tracker.subscribe(lambda stage, done, total: self.show(progress_text(stage, done, total)))
-
-    async def _edit_when_due(self) -> None:
-        delay = self._last_edit + STATUS_EDIT_INTERVAL_SECONDS - time.monotonic()
-        if delay > 0:
-            await asyncio.sleep(delay)
-        if self._settled or self._wanted == self._shown:
-            return
-
-        text = self._wanted
-        try:
-            await self._message.edit_text(text)
-            self._shown = text
-        except TelegramError:
-            # A progress line is not worth failing over; the final edit is.
-            logger.warning("Failed to update a status message", exc_info=True)
-        finally:
-            self._last_edit = time.monotonic()
-
-    async def _settle(self) -> None:
-        self._settled = True
-        if self._pending is not None and not self._pending.done():
-            self._pending.cancel()
-            # gather returns the edit's own CancelledError instead of
-            # raising it, while a cancellation of this handler still goes
-            # through - suppressing CancelledError here would swallow that.
-            await asyncio.gather(self._pending, return_exceptions=True)
-
-    async def fail(self, text: str) -> None:
-        await self._settle()
-        await self._message.edit_text(text)
-
-    async def done(self) -> None:
-        await self._settle()
-        await self._message.delete()
 
 
 def too_large_text(error: media.MediaTooLargeError) -> str:
@@ -218,7 +127,7 @@ async def deliver_post(message, url: str, context: ContextTypes.DEFAULT_TYPE) ->
     Every failure the flow foresees settles the status message with its own
     text. Anything else is caught here, so the message never stays at
     "Скачиваю публикацию..." with nothing coming."""
-    status = await StatusMessage.send(message)
+    status = await status_message.ReplyStatus.send(message)
     try:
         await _deliver_post(message, url, context, status)
     except Exception:
@@ -229,7 +138,7 @@ async def deliver_post(message, url: str, context: ContextTypes.DEFAULT_TYPE) ->
             logger.exception("Failed to tell the user about it either")
 
 
-async def _deliver_post(message, url: str, context: ContextTypes.DEFAULT_TYPE, status: StatusMessage) -> None:
+async def _deliver_post(message, url: str, context: ContextTypes.DEFAULT_TYPE, status: status_message.ReplyStatus) -> None:
     await context.bot.send_chat_action(chat_id=message.chat_id, action=ChatAction.UPLOAD_VIDEO)
 
     # Fast path: this post was already downloaded and uploaded to the
