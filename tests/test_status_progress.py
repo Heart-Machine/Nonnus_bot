@@ -1,6 +1,7 @@
-"""The status message under a link: showing what the preparation is doing,
-settling exactly once, and never left hanging when something unforeseen
-breaks - plus the application's last-resort error handler.
+"""The status message under a link and the caption of an inline placeholder:
+showing what the preparation is doing, settling exactly once, and never left
+hanging when something unforeseen breaks - plus the application's
+last-resort error handler.
 
 The edit interval is shortened for the tests; downloads are stand-ins that
 report stages the way the real ones do.
@@ -15,14 +16,14 @@ from telegram import Bot, Update
 from telegram.error import BadRequest
 from telegram.request import BaseRequest
 
-from nonnus import app, cache, config, delivery, handlers, instagram, media, preparation, progress
+from nonnus import app, cache, config, delivery, handlers, inline, instagram, media, preparation, progress, status_message
 
 POST_URL = "https://www.instagram.com/p/ABC123/"
 
 
 @pytest.fixture(autouse=True)
 def quick_edits(monkeypatch):
-    monkeypatch.setattr(handlers, "STATUS_EDIT_INTERVAL_SECONDS", 0.05)
+    monkeypatch.setattr(status_message, "STATUS_EDIT_INTERVAL_SECONDS", 0.05)
 
 
 class RecordedMessage:
@@ -56,18 +57,18 @@ class RecordedMessage:
     ],
 )
 def test_each_stage_has_its_text(stage, done, total, expected):
-    assert handlers.progress_text(stage, done, total) == expected
+    assert status_message.progress_text(stage, done, total) == expected
 
 
 # --- the status message ---------------------------------------------------
 
 
 def test_quick_updates_are_thinned_out_to_the_latest(monkeypatch):
-    monkeypatch.setattr(handlers, "STATUS_EDIT_INTERVAL_SECONDS", 0.3)
+    monkeypatch.setattr(status_message, "STATUS_EDIT_INTERVAL_SECONDS", 0.3)
     message = RecordedMessage()
 
     async def run():
-        status = handlers.StatusMessage(message, "start")
+        status = status_message.ReplyStatus(message, "start")
         # Spaced out, each one arriving well inside the interval.
         for text in ["1 из 3", "2 из 3", "3 из 3"]:
             status.show(text)
@@ -82,12 +83,12 @@ def test_quick_updates_are_thinned_out_to_the_latest(monkeypatch):
 def test_settling_cancels_a_pending_update(monkeypatch):
     # A late "3 из 10" must not overwrite the error that followed it - and
     # the error must not wait for the pending edit's turn to come.
-    monkeypatch.setattr(handlers, "STATUS_EDIT_INTERVAL_SECONDS", 1.0)
+    monkeypatch.setattr(status_message, "STATUS_EDIT_INTERVAL_SECONDS", 1.0)
     message = RecordedMessage()
 
     async def run():
         loop = asyncio.get_running_loop()
-        status = handlers.StatusMessage(message, "start")
+        status = status_message.ReplyStatus(message, "start")
         status.show("3 из 10")
         await asyncio.sleep(0)
         started = loop.time()
@@ -103,11 +104,28 @@ def test_settling_cancels_a_pending_update(monkeypatch):
     assert took < 0.5
 
 
+def test_nothing_is_shown_after_settling(monkeypatch):
+    # A stage reported once the message is settled - its last word said -
+    # is not shown, however soon an edit would be due.
+    monkeypatch.setattr(status_message, "STATUS_EDIT_INTERVAL_SECONDS", 0)
+    message = RecordedMessage()
+
+    async def run():
+        status = status_message.ReplyStatus(message, "start")
+        await status.fail("error")
+        status.show("Загружаю в Telegram...")
+        await asyncio.sleep(0.05)
+
+    asyncio.run(run())
+
+    assert message.edits == ["error"]
+
+
 def test_settling_does_not_swallow_a_cancellation_of_the_handler(monkeypatch):
     # If the handler itself is cancelled while settling - at shutdown, say -
     # that must go through, not be taken for the pending edit's own
     # cancellation and quietly dropped.
-    monkeypatch.setattr(handlers, "STATUS_EDIT_INTERVAL_SECONDS", 0)
+    monkeypatch.setattr(status_message, "STATUS_EDIT_INTERVAL_SECONDS", 0)
 
     class SlowToCancel(RecordedMessage):
         """A progress edit that takes a moment to wind down once cancelled;
@@ -124,7 +142,7 @@ def test_settling_does_not_swallow_a_cancellation_of_the_handler(monkeypatch):
                 raise
 
     async def run():
-        status = handlers.StatusMessage(SlowToCancel(), "start")
+        status = status_message.ReplyStatus(SlowToCancel(), "start")
         status.show("1 из 3")
         await asyncio.sleep(0.01)
         settling = asyncio.get_running_loop().create_task(status.fail("error"))
@@ -144,7 +162,7 @@ def test_a_progress_edit_that_fails_is_not_fatal():
     message = RecordedMessage(fail_edits=True)
 
     async def run():
-        status = handlers.StatusMessage(message, "start")
+        status = status_message.ReplyStatus(message, "start")
         status.show("1 из 3")
         await asyncio.sleep(0.15)
         await status.done()
@@ -159,7 +177,7 @@ def test_the_same_text_is_not_edited_again():
     message = RecordedMessage()
 
     async def run():
-        status = handlers.StatusMessage(message, "start")
+        status = status_message.ReplyStatus(message, "start")
         status.show("start")
         await asyncio.sleep(0.15)
 
@@ -360,6 +378,107 @@ def test_an_unforeseen_failure_does_not_leave_the_status_hanging(monkeypatch):
     run_deliver_post(chat)
 
     assert chat.status.edits == [handlers.UNEXPECTED_ERROR_TEXT]
+
+
+# --- the inline placeholder -------------------------------------------------
+
+
+class PlaceholderBot:
+    """The bot as the chosen placeholder sees it: records the caption edits
+    and the swap for the post, in the order they were made."""
+
+    def __init__(self):
+        self.calls = []
+
+    async def edit_message_caption(self, **kwargs):
+        self.calls.append(("caption", kwargs))
+
+    async def edit_message_media(self, **kwargs):
+        self.calls.append(("media", kwargs))
+
+    def captions(self):
+        return [kwargs["caption"] for call, kwargs in self.calls if call == "caption"]
+
+
+def choose_the_placeholder(monkeypatch, settle_for=0.0):
+    """Someone sends the placeholder for POST_URL, not prepared yet; returns
+    the bot's calls, `settle_for` seconds after the handler is done."""
+    bot = PlaceholderBot()
+
+    async def get_bot_username(context):
+        return "nonnus_bot"
+
+    async def run():
+        loop = asyncio.get_running_loop()
+        context = SimpleNamespace(application=SimpleNamespace(bot_data={}, create_task=loop.create_task), bot=bot)
+        update = SimpleNamespace(
+            chosen_inline_result=SimpleNamespace(
+                result_id=inline.inline_result_id(POST_URL), inline_message_id="inline-message", query=POST_URL
+            )
+        )
+        await inline.handle_chosen_inline_result(update, context)
+        await asyncio.sleep(settle_for)
+
+    monkeypatch.setattr(delivery, "get_bot_username", get_bot_username)
+    asyncio.run(run())
+    return bot
+
+
+def test_the_placeholder_follows_the_preparation_then_becomes_the_post(monkeypatch, slow_carousel):
+    bot = choose_the_placeholder(monkeypatch)
+
+    assert any(text.startswith("Скачиваю публикацию:") and "из 3" in text for text in bot.captions())
+    assert "Загружаю в Telegram..." in bot.captions()
+    assert [call for call, kwargs in bot.calls][-1] == "media"
+    assert {kwargs["inline_message_id"] for call, kwargs in bot.calls} == {"inline-message"}
+
+
+def test_every_caption_edit_keeps_the_placeholder_button(monkeypatch, slow_carousel):
+    # An edit that leaves reply_markup out takes the keyboard off the message.
+    bot = choose_the_placeholder(monkeypatch)
+
+    keyboards = [kwargs["reply_markup"] for call, kwargs in bot.calls if call == "caption"]
+    assert keyboards
+    for keyboard in keyboards:
+        button = keyboard.inline_keyboard[0][0]
+        assert (button.text, button.url) == ("Открыть в Instagram", POST_URL)
+
+
+def test_no_progress_edit_lands_on_the_post_once_it_is_swapped_in(monkeypatch, slow_carousel):
+    # An edit still waiting for its turn when the post is ready would, if
+    # let through, replace the post's caption with "Загружаю в Telegram...".
+    # The interval is long enough for the whole preparation to fit inside
+    # it, so an edit is still waiting when the post is swapped in.
+    monkeypatch.setattr(status_message, "STATUS_EDIT_INTERVAL_SECONDS", 0.5)
+
+    async def upload_items_to_storage(context, items, caption):
+        return [{"type": "photo", "file_id": f"f{n}"} for n in range(len(items))]
+
+    def download_post(url, download_dir):
+        path = download_dir / "1.jpg"
+        path.write_bytes(b"photo")
+        progress.report(progress.DOWNLOADING, 1, 1)
+        return [media.MediaItem(path, "photo")], "caption"
+
+    monkeypatch.setattr(instagram, "download_post", download_post)
+    monkeypatch.setattr(delivery, "upload_items_to_storage", upload_items_to_storage)
+
+    bot = choose_the_placeholder(monkeypatch, settle_for=0.8)
+
+    assert [call for call, kwargs in bot.calls][-1] == "media"
+
+
+def test_a_failed_preparation_shows_on_the_placeholder(monkeypatch, slow_carousel):
+    def broken(url, download_dir):
+        raise RuntimeError("private post")
+
+    monkeypatch.setattr(instagram, "download_post", broken)
+
+    bot = choose_the_placeholder(monkeypatch)
+
+    assert bot.captions()[-1] == "Не получилось подготовить публикацию. Попробуй еще раз."
+    assert bot.calls[-1][1]["reply_markup"].inline_keyboard[0][0].text == "Открыть в Instagram"
+    assert [call for call, kwargs in bot.calls if call == "media"] == []
 
 
 # --- the last-resort error handler ------------------------------------------

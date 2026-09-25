@@ -23,7 +23,7 @@ from telegram.constants import ParseMode
 from telegram.error import TelegramError
 from telegram.ext import ContextTypes
 
-from nonnus import config, links, instagram, cache, delivery, preparation
+from nonnus import config, links, instagram, cache, delivery, preparation, status_message
 
 
 logger = logging.getLogger(__name__)
@@ -233,6 +233,13 @@ async def get_placeholder_photo_file_id(context: ContextTypes.DEFAULT_TYPE) -> O
         return file_id
 
 
+PLACEHOLDER_CAPTION = "Готовлю видео, подожди немного — сообщение обновится само..."
+
+
+def placeholder_keyboard(url: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[InlineKeyboardButton("Открыть в Instagram", url=links.normalize_post_url(url))]])
+
+
 def build_inline_placeholder_result(url: str, photo_file_id: str) -> InlineQueryResultCachedPhoto:
     """A placeholder inline result shown while a Reel is being prepared. It
     carries a reply_markup so Telegram is guaranteed to report an
@@ -244,10 +251,8 @@ def build_inline_placeholder_result(url: str, photo_file_id: str) -> InlineQuery
         photo_file_id=photo_file_id,
         title="Готовлю видео...",
         description="Нажми, чтобы отправить — видео появится тут само через несколько секунд",
-        caption="Готовлю видео, подожди немного — сообщение обновится само...",
-        reply_markup=InlineKeyboardMarkup(
-            [[InlineKeyboardButton("Открыть в Instagram", url=links.normalize_post_url(url))]]
-        ),
+        caption=PLACEHOLDER_CAPTION,
+        reply_markup=placeholder_keyboard(url),
     )
 
 
@@ -417,19 +422,24 @@ async def handle_chosen_inline_result(update: Update, context: ContextTypes.DEFA
     cached_result = cache.get_cached_inline_result(url)
     if cached_result is None:
         task = preparation.get_or_create_prepare_task(url, context, reuse_failure=True)
+        # Meanwhile the placeholder's caption shows how the preparation goes,
+        # as the status message under a link sent to the bot does.
+        status = status_message.PlaceholderStatus(
+            context.bot, chosen.inline_message_id, PLACEHOLDER_CAPTION, placeholder_keyboard(url)
+        )
+        status.follow(preparation.progress_of(task))
         try:
             cached_result = await task
         except Exception as error:
             logger.warning("Could not prepare %s for the chosen placeholder: %s", url, preparation.describe_failure(error))
             try:
-                await context.bot.edit_message_caption(
-                    inline_message_id=chosen.inline_message_id,
-                    caption="Не получилось подготовить публикацию. Попробуй еще раз.",
-                    reply_markup=None,
-                )
+                await status.fail("Не получилось подготовить публикацию. Попробуй еще раз.")
             except TelegramError:
                 pass
             return
+        # Before the swap: a progress edit landing after it would replace the
+        # post's own caption.
+        await status.settle()
 
     items = cached_result.get("items") or []
     if not items:
