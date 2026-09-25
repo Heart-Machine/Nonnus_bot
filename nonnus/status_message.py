@@ -22,16 +22,26 @@ logger = logging.getLogger(__name__)
 DOWNLOADING_TEXT = "Скачиваю публикацию..."
 
 
-def progress_text(stage: str, done: int = 0, total: int = 0) -> str:
+# What is being downloaded, as it goes after "Скачиваю". "Публикация" until
+# the post has been looked at and its kind is known.
+KIND_NOUNS = {
+    progress.REEL: "рилс",
+    progress.PHOTO: "фото",
+    progress.CAROUSEL: "карусель",
+}
+
+
+def progress_text(stage: str, done: int = 0, total: int = 0, kind: Optional[str] = None) -> str:
     if stage == progress.QUEUED:
         return "Жду своей очереди: сейчас скачиваются другие публикации..."
     if stage == progress.COMPRESSING:
         return "Видео большое, сжимаю перед отправкой..."
     if stage == progress.UPLOADING:
         return "Загружаю в Telegram..."
+    noun = KIND_NOUNS.get(kind, "публикацию")
     if total > 1:
-        return f"Скачиваю публикацию: {done} из {total}..."
-    return DOWNLOADING_TEXT
+        return f"Скачиваю {noun}: {done} из {total}..."
+    return f"Скачиваю {noun}..."
 
 
 # The least time between two edits of a status message. Telegram limits how
@@ -70,7 +80,7 @@ class StatusMessage:
 
     def follow(self, tracker: Optional[progress.Progress]) -> None:
         if tracker is not None:
-            tracker.subscribe(lambda stage, done, total: self.show(progress_text(stage, done, total)))
+            tracker.subscribe(lambda stage, done, total, kind: self.show(progress_text(stage, done, total, kind)))
 
     async def _edit_when_due(self) -> None:
         delay = self._last_edit + STATUS_EDIT_INTERVAL_SECONDS - time.monotonic()

@@ -60,6 +60,18 @@ def test_each_stage_has_its_text(stage, done, total, expected):
     assert status_message.progress_text(stage, done, total) == expected
 
 
+@pytest.mark.parametrize(
+    "done, total, kind, expected",
+    [
+        (0, 1, progress.REEL, "Скачиваю рилс..."),
+        (0, 1, progress.PHOTO, "Скачиваю фото..."),
+        (3, 12, progress.CAROUSEL, "Скачиваю карусель: 3 из 12..."),
+    ],
+)
+def test_once_the_post_is_known_the_text_names_it(done, total, kind, expected):
+    assert status_message.progress_text(progress.DOWNLOADING, done, total, kind) == expected
+
+
 # --- the status message ---------------------------------------------------
 
 
@@ -205,7 +217,7 @@ def test_a_report_from_a_worker_thread_reaches_the_listeners_on_the_loop():
 
     asyncio.run(run())
 
-    assert heard == [((progress.DOWNLOADING, 1, 3), True)]
+    assert heard == [((progress.DOWNLOADING, 1, 3, None), True)]
 
 
 def test_someone_joining_late_hears_the_current_stage():
@@ -219,23 +231,24 @@ def test_someone_joining_late_hears_the_current_stage():
 
     asyncio.run(run())
 
-    assert heard == [(progress.UPLOADING, 0, 0)]
+    assert heard == [(progress.UPLOADING, 0, 0, None)]
 
 
 def test_outside_a_preparation_a_report_goes_nowhere():
     progress.report(progress.DOWNLOADING, 1, 2)
 
 
-def test_download_post_counts_the_files_as_they_come(monkeypatch, tmp_path):
-    entries = [{"id": "a", "formats": [], "thumbnails": [{"url": "https://cdn/a.jpg"}]},
-               {"id": "b", "formats": [{"url": "https://cdn/b.mp4"}], "thumbnails": []},
-               {"id": "c", "formats": [], "thumbnails": [{"url": "https://cdn/c.jpg"}]}]
-    monkeypatch.setattr(instagram, "probe_post", lambda url, download_dir, use_cookies=True: {"entries": entries})
+def stages_of_download(monkeypatch, tmp_path, info):
+    """Run download_post on a probed post `info`, with the files coming down
+    as stand-ins, and return the stages it reported."""
+    monkeypatch.setattr(instagram, "probe_post", lambda url, download_dir, use_cookies=True: info)
 
     def download_post_videos(url, download_dir, entries, video_indices, use_cookies=True):
-        path = download_dir / "b.mp4"
-        path.write_bytes(b"video")
-        return {1: path}
+        paths = {}
+        for index in video_indices:
+            paths[index] = download_dir / f"{index}.mp4"
+            paths[index].write_bytes(b"video")
+        return paths
 
     def download_photo(entry, index, download_dir):
         path = download_dir / f"{index}.jpg"
@@ -246,6 +259,7 @@ def test_download_post_counts_the_files_as_they_come(monkeypatch, tmp_path):
     monkeypatch.setattr(instagram, "download_photo", download_photo)
     monkeypatch.setattr(media, "prepare_photo_for_upload", lambda path, work_dir: path)
     monkeypatch.setattr(media, "ensure_h264_video", lambda path, work_dir: path)
+    monkeypatch.setattr(media, "add_audio_warning_if_needed", lambda caption, path: caption)
     heard = []
 
     async def run():
@@ -256,9 +270,30 @@ def test_download_post_counts_the_files_as_they_come(monkeypatch, tmp_path):
         await asyncio.sleep(0)
 
     asyncio.run(run())
+    return heard
+
+
+VIDEO = {"id": "v", "formats": [{"url": "https://cdn/v.mp4"}], "thumbnails": []}
+PHOTO = {"id": "f", "formats": [], "thumbnails": [{"url": "https://cdn/f.jpg"}]}
+
+
+def test_download_post_counts_the_files_of_a_carousel_as_they_come(monkeypatch, tmp_path):
+    heard = stages_of_download(monkeypatch, tmp_path, {"entries": [PHOTO, VIDEO, PHOTO]})
 
     # The video pass first, then each photo.
-    assert heard == [("downloading", 0, 3), ("downloading", 1, 3), ("downloading", 2, 3), ("downloading", 3, 3)]
+    assert heard == [
+        (progress.DOWNLOADING, 0, 3, progress.CAROUSEL),
+        (progress.DOWNLOADING, 1, 3, progress.CAROUSEL),
+        (progress.DOWNLOADING, 2, 3, progress.CAROUSEL),
+        (progress.DOWNLOADING, 3, 3, progress.CAROUSEL),
+    ]
+
+
+@pytest.mark.parametrize("info, kind", [(VIDEO, progress.REEL), (PHOTO, progress.PHOTO)])
+def test_download_post_says_what_a_lone_file_is(monkeypatch, tmp_path, info, kind):
+    heard = stages_of_download(monkeypatch, tmp_path, dict(info))
+
+    assert {stage[3] for stage in heard} == {kind}
 
 
 def test_waiting_for_a_slot_is_reported(monkeypatch, tmp_path):
@@ -333,7 +368,7 @@ def slow_carousel(monkeypatch):
             path = download_dir / f"{done}.jpg"
             path.write_bytes(b"photo")
             items.append(media.MediaItem(path, "photo"))
-            progress.report(progress.DOWNLOADING, done, 3)
+            progress.report(progress.DOWNLOADING, done, 3, progress.CAROUSEL)
         return items, "caption"
 
     async def upload_items_to_storage(context, items, caption):
@@ -353,7 +388,7 @@ def test_the_status_follows_the_preparation_and_goes_away_at_the_end(slow_carous
 
     run_deliver_post(chat)
 
-    assert any(text.startswith("Скачиваю публикацию:") and "из 3" in text for text in chat.status.edits)
+    assert any(text.startswith("Скачиваю карусель:") and "из 3" in text for text in chat.status.edits)
     assert "Загружаю в Telegram..." in chat.status.edits
     assert chat.status.deleted
 
@@ -427,7 +462,7 @@ def choose_the_placeholder(monkeypatch, settle_for=0.0):
 def test_the_placeholder_follows_the_preparation_then_becomes_the_post(monkeypatch, slow_carousel):
     bot = choose_the_placeholder(monkeypatch)
 
-    assert any(text.startswith("Скачиваю публикацию:") and "из 3" in text for text in bot.captions())
+    assert any(text.startswith("Скачиваю карусель:") and "из 3" in text for text in bot.captions())
     assert "Загружаю в Telegram..." in bot.captions()
     assert [call for call, kwargs in bot.calls][-1] == "media"
     assert {kwargs["inline_message_id"] for call, kwargs in bot.calls} == {"inline-message"}
