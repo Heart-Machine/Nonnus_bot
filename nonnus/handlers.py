@@ -37,6 +37,33 @@ UPLOAD_FAILED_TEXT = (
 UNEXPECTED_ERROR_TEXT = "Что-то пошло не так. Попробуй ещё раз чуть позже."
 
 
+def no_media_text(url: str) -> str:
+    """What to say when Instagram gave nothing to download. For a story that
+    mostly means it is gone: they last a day."""
+    kind = links.story_kind(url)
+    if kind == links.STORY:
+        return "Этой сторис больше нет: сторис живут сутки."
+    if kind == links.STORIES:
+        return "Сейчас у этого пользователя нет сторис."
+    if kind == links.HIGHLIGHT:
+        return "В этом хайлайте нет ни видео, ни фото, которые я могу скачать."
+    return "В этой публикации нет ни видео, ни фото, которые я могу скачать."
+
+
+def download_failed_text(url: str) -> str:
+    kind = links.story_kind(url)
+    if kind == links.STORY:
+        return "Не получилось скачать сторис. Возможно, она уже исчезла - сторис живут сутки - или аккаунт закрытый."
+    if kind == links.STORIES:
+        return "Не получилось скачать сторис. Возможно, сейчас их нет или аккаунт закрытый."
+    if kind == links.HIGHLIGHT:
+        return "Не получилось скачать хайлайт. Возможно, его удалили или аккаунт закрытый."
+    return (
+        "Не получилось скачать публикацию. Возможно, она закрытая или удалена. "
+        "Если ссылка открывается в Instagram, попробуй ещё раз чуть позже."
+    )
+
+
 SHARE_LINK_UNRESOLVED_TEXT = (
     "Не получилось понять, на какой пост ведёт эта ссылка: Instagram не ответил. "
     "Пришли обычную ссылку на пост - в Instagram это «Копировать ссылку»."
@@ -81,7 +108,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             await deliver_post(message, url, context)
             return
 
-    text = "Пришли ссылку на Instagram — Reel, пост с фото или карусель, а я отправлю всё содержимое сюда."
+    text = (
+        "Пришли ссылку на Instagram — Reel, пост с фото или карусель, сторис или хайлайт, "
+        "а я отправлю всё содержимое сюда."
+    )
     note = users.limit_note(message.from_user)
     await message.reply_text(f"{text}\n\n{note}" if note else text)
 
@@ -106,8 +136,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     url = links.find_instagram_url(message.text)
     if not url:
         await message.reply_text(
-            "Не вижу ссылку на Instagram. Пришли ссылку на Reel или пост в формате: "
-            "instagram.com / reel / CODE или instagram.com / p / CODE",
+            "Не вижу ссылку на Instagram. Пришли ссылку на Reel, пост, сторис или хайлайт в формате: "
+            "instagram.com / reel / CODE, instagram.com / p / CODE или instagram.com / stories / ...",
             disable_web_page_preview=True,
         )
         return
@@ -141,6 +171,11 @@ async def deliver_post(message, url: str, context: ContextTypes.DEFAULT_TYPE) ->
 
 
 async def _deliver_post(message, url: str, context: ContextTypes.DEFAULT_TYPE, status: status_message.ReplyStatus) -> None:
+    refusal = users.refusal_for(message.from_user, url)
+    if refusal:
+        await status.fail(refusal)
+        return
+
     await context.bot.send_chat_action(chat_id=message.chat_id, action=ChatAction.UPLOAD_VIDEO)
 
     # Fast path: this post was already downloaded and uploaded to the
@@ -185,7 +220,7 @@ async def _deliver_post(message, url: str, context: ContextTypes.DEFAULT_TYPE, s
             cached_result = await task
         except instagram.NoMediaInPostError:
             logger.info("No downloadable media in post %s", url)
-            await status.fail("В этой публикации нет ни видео, ни фото, которые я могу скачать.")
+            await status.fail(no_media_text(url))
             return
         except instagram.IncompletePostError as error:
             logger.warning("Could not fetch all of %s: %s", url, preparation.describe_failure(error))
@@ -205,10 +240,7 @@ async def _deliver_post(message, url: str, context: ContextTypes.DEFAULT_TYPE, s
             return
         except Exception as error:
             logger.warning("Failed to prepare %s: %s", url, preparation.describe_failure(error))
-            await status.fail(
-                "Не получилось скачать публикацию. Возможно, она закрытая или удалена. "
-                "Если ссылка открывается в Instagram, попробуй ещё раз чуть позже."
-            )
+            await status.fail(download_failed_text(url))
             return
 
         try:
@@ -242,7 +274,7 @@ async def _deliver_post(message, url: str, context: ContextTypes.DEFAULT_TYPE, s
         except instagram.NoMediaInPostError:
             users.give_back_download(download)
             logger.info("No downloadable media in post %s", url)
-            await status.fail("В этой публикации нет ни видео, ни фото, которые я могу скачать.")
+            await status.fail(no_media_text(url))
             return
         except instagram.IncompletePostError:
             users.give_back_download(download)
@@ -252,10 +284,7 @@ async def _deliver_post(message, url: str, context: ContextTypes.DEFAULT_TYPE, s
         except Exception:
             users.give_back_download(download)
             logger.exception("Failed to download %s", url)
-            await status.fail(
-                "Не получилось скачать публикацию. Возможно, она закрытая или удалена. "
-                "Если ссылка открывается в Instagram, попробуй ещё раз чуть позже."
-            )
+            await status.fail(download_failed_text(url))
             return
 
         items, compressed = await preparation.prepare_items_in_thread(items, temp_dir)

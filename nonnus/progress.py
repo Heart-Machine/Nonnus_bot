@@ -27,6 +27,9 @@ UPLOADING = "uploading"
 REEL = "reel"
 PHOTO = "photo"
 CAROUSEL = "carousel"
+# Known from the link itself, the one exception: whatever is in them.
+STORY = "story"
+HIGHLIGHT = "highlight"
 
 Listener = Callable[[str, int, int, Optional[str]], None]
 

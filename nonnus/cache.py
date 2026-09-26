@@ -39,10 +39,16 @@ class PostCache:
         self.legacy_json = legacy_json
         self._connection: Optional[sqlite3.Connection] = None
 
-    def get(self, url: str, version: str) -> Optional[dict[str, Any]]:
-        row = self._connect().execute(
-            "SELECT result FROM posts WHERE url = ? AND version = ?", (url, version)
-        ).fetchone()
+    def get(self, url: str, version: str, max_age_seconds: Optional[int] = None) -> Optional[dict[str, Any]]:
+        if max_age_seconds is None:
+            row = self._connect().execute(
+                "SELECT result FROM posts WHERE url = ? AND version = ?", (url, version)
+            ).fetchone()
+        else:
+            row = self._connect().execute(
+                "SELECT result FROM posts WHERE url = ? AND version = ? AND saved_at >= datetime('now', ?)",
+                (url, version, f"-{max_age_seconds} seconds"),
+            ).fetchone()
         return json.loads(row[0]) if row else None
 
     def put(self, url: str, version: str, result: dict[str, Any]) -> None:
@@ -129,11 +135,24 @@ class PostCache:
 POST_CACHE = PostCache(config.INLINE_CACHE_DB, legacy_json=config.INLINE_CACHE_FILE)
 
 
+# How long a highlight or someone's current stories are served from the cache.
+# A post and a single story stay what they were; these change - a story is
+# added, one expires, the owner edits a highlight - so after this they are
+# downloaded again.
+CHANGING_STORIES_MAX_AGE_SECONDS = 60 * 60
+
+
+def max_age_of(url: str) -> Optional[int]:
+    if links.story_kind(url) in (links.STORIES, links.HIGHLIGHT):
+        return CHANGING_STORIES_MAX_AGE_SECONDS
+    return None
+
+
 def get_cached_inline_result(url: str) -> Optional[dict[str, Any]]:
     """The cached post, or None - also when the cache cannot be read, since a
     post that is not in the cache is simply downloaded again."""
     try:
-        cached_result = POST_CACHE.get(links.normalize_post_url(url), INLINE_CACHE_VERSION)
+        cached_result = POST_CACHE.get(links.normalize_post_url(url), INLINE_CACHE_VERSION, max_age_of(url))
     except (sqlite3.Error, OSError, ValueError):
         logger.exception("Failed to read the post cache")
         return None

@@ -22,6 +22,7 @@ from typing import (
 from urllib.parse import parse_qs, urljoin, urlparse
 
 from yt_dlp import YoutubeDL
+from yt_dlp.extractor.instagram import InstagramStoryIE
 from yt_dlp.utils import ExtractorError, YoutubeDLError
 
 from nonnus import config, links, media, progress
@@ -45,6 +46,13 @@ def post_kind(total: int, has_video: bool) -> str:
     if total > 1:
         return progress.CAROUSEL
     return progress.REEL if has_video else progress.PHOTO
+
+
+def story_label(kind: str, info: dict[str, Any]) -> str:
+    if kind == links.HIGHLIGHT:
+        title = info.get("title")
+        return f"Хайлайт «{title}»" if title else "Хайлайт"
+    return "Сторис"
 
 
 def build_post_caption(info: dict[str, Any], fallback_url: str, label: str = "Пост") -> str:
@@ -295,6 +303,39 @@ def build_ydl_opts(download_dir: Path, use_cookies: bool = True) -> dict[str, An
     return ydl_opts
 
 
+# The format a photo item of a story wears through StoryWithPhotosIE.
+PHOTO_PLACEHOLDER_FORMAT_ID = "nonnus-photo"
+
+
+class StoryWithPhotosIE(InstagramStoryIE):
+    """yt-dlp's story extractor, keeping the photos.
+
+    It builds every item with _extract_product and then keeps only the ones
+    with `formats` - the videos. A highlight tried held 95 items, 59 videos
+    and 36 photos, and yt-dlp returned the 59. Here a photo item wears a
+    placeholder format for the length of the extraction, so it gets through
+    that check, and takes it off at the end: it comes out the way a post's
+    photo does, its pictures under `thumbnails` and no formats. Everything
+    else - the requests, the headers, the fixes each yt-dlp release brings -
+    stays yt-dlp's."""
+
+    IE_NAME = "nonnus:instagram:story"
+
+    def _extract_product(self, *args, **kwargs):
+        info = super()._extract_product(*args, **kwargs)
+        if not info.get("formats") and info.get("thumbnails"):
+            info["formats"] = [{"format_id": PHOTO_PLACEHOLDER_FORMAT_ID, "url": info["thumbnails"][-1]["url"]}]
+        return info
+
+    def _real_extract(self, url):
+        result = super()._real_extract(url)
+        for entry in [result, *((result or {}).get("entries") or [])]:
+            formats = (entry or {}).get("formats") or []
+            if [fmt.get("format_id") for fmt in formats] == [PHOTO_PLACEHOLDER_FORMAT_ID]:
+                entry["formats"] = []
+        return result
+
+
 def probe_post(url: str, download_dir: Path, use_cookies: bool = True) -> dict[str, Any]:
     """The one request to Instagram's API for a post: what the extractor
     returns, unprocessed.
@@ -311,9 +352,18 @@ def probe_post(url: str, download_dir: Path, use_cookies: bool = True) -> dict[s
     anything process it, photo posts and mixed carousels come through."""
     ydl_opts = build_ydl_opts(download_dir, use_cookies)
     ydl_opts["ignore_no_formats_error"] = True
+    story = links.story_kind(url)
+    if story == links.STORY:
+        # One story. Left to the playlist setting, yt-dlp would bring all of
+        # the user's current ones.
+        ydl_opts["noplaylist"] = True
 
     with YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(url, download=False, process=False)
+        if story is None:
+            info = ydl.extract_info(url, download=False, process=False)
+        else:
+            ydl.add_info_extractor(StoryWithPhotosIE())
+            info = ydl.extract_info(url, download=False, process=False, ie_key=StoryWithPhotosIE.ie_key())
 
     if info and info.get("entries") is not None:
         # A generator would be used up by the first look at the entries,
@@ -592,9 +642,13 @@ def download_post(url: str, download_dir: Path) -> Tuple[list[media.MediaItem], 
     if not entries:
         raise NoMediaInPostError("This Instagram post has no downloadable media.")
 
+    story = links.story_kind(url)
     total = len(entries)
     video_indices = [index for index, entry in enumerate(entries) if entry_has_video(entry)]
-    kind = post_kind(total, bool(video_indices))
+    if story is None:
+        kind = post_kind(total, bool(video_indices))
+    else:
+        kind = progress.HIGHLIGHT if story == links.HIGHLIGHT else progress.STORY
     progress.report(progress.DOWNLOADING, 0, total, kind)
     video_paths: dict[int, Path] = {}
     if video_indices:
@@ -633,7 +687,12 @@ def download_post(url: str, download_dir: Path) -> Tuple[list[media.MediaItem], 
         positions = ", ".join(str(index + 1) for index in missing)
         raise IncompletePostError(f"Could not fetch file(s) {positions} of {len(entries)} in {url}")
 
-    caption = build_post_caption(info, url, post_label(items))
+    if story is None:
+        caption = build_post_caption(info, url, post_label(items))
+    else:
+        # A playlist of stories names its author only on the items.
+        author = {"channel": info.get("channel") or entries[0].get("channel")}
+        caption = build_post_caption({**info, **author}, url, story_label(story, info))
     if len(items) == 1 and items[0].is_video:
         # Only meaningful for a lone video: in a carousel a silent clip next
         # to photos is normal, not a symptom of a stripped audio track.

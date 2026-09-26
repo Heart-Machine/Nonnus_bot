@@ -28,6 +28,8 @@ KIND_NOUNS = {
     progress.REEL: "рилс",
     progress.PHOTO: "фото",
     progress.CAROUSEL: "карусель",
+    progress.STORY: "сторис",
+    progress.HIGHLIGHT: "хайлайт",
 }
 
 
