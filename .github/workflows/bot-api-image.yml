@@ -1,0 +1,71 @@
+name: Bot API server image
+
+# The Telegram Bot API server the bot is to talk to instead of
+# api.telegram.org, built from source (docker/telegram-bot-api/Dockerfile).
+# A pull request that changes it builds it, to see that it builds; main and a
+# run by hand push it to GHCR. Nothing deploys it yet.
+#
+# The image is tagged by the server's commit, the one thing that says which
+# server it is. A build of the same commit - a new base image, say - moves the
+# tag, so whatever deploys it is to pin the digest.
+
+on:
+  pull_request:
+    paths:
+      - docker/telegram-bot-api/**
+      - .github/workflows/bot-api-image.yml
+  push:
+    branches:
+      - main
+    paths:
+      - docker/telegram-bot-api/**
+      - .github/workflows/bot-api-image.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build:
+    name: Build Bot API server image
+    runs-on: ubuntu-24.04
+    # TDLib is a large C++ build: tens of minutes from scratch, a few with
+    # the layer cache.
+    timeout-minutes: 120
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Prepare image name
+        id: image
+        run: |
+          COMMIT="$(sed -n 's/^ARG TELEGRAM_BOT_API_COMMIT=//p' docker/telegram-bot-api/Dockerfile)"
+          if [ -z "$COMMIT" ]; then
+            echo "No TELEGRAM_BOT_API_COMMIT in docker/telegram-bot-api/Dockerfile" >&2
+            exit 1
+          fi
+          echo "image=ghcr.io/${GITHUB_REPOSITORY,,}/telegram-bot-api:${COMMIT:0:12}" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Login to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: docker/telegram-bot-api
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.image.outputs.image }}
+          labels: org.opencontainers.image.source=https://github.com/${{ github.repository }}
+          # A scope of its own, so this build and the bot's do not push each
+          # other's layers out of the cache.
+          cache-from: type=gha,scope=telegram-bot-api
+          cache-to: type=gha,mode=max,scope=telegram-bot-api

@@ -62,3 +62,17 @@ updates:
         update-types:
           - version-update:semver-major
           - version-update:semver-minor
+
+  # The Bot API server's base image, pinned by digest the same way and kept
+  # within Debian 13: a new Debian can rename the libraries the runtime stage
+  # installs - libssl3 became libssl3t64 in 13 - so moving to one is a change
+  # to make and build on purpose. The
+  # server itself is pinned by commit, which Dependabot does not follow.
+  - package-ecosystem: docker
+    directory: /docker/telegram-bot-api
+    schedule:
+      interval: monthly
+    ignore:
+      - dependency-name: debian
+        update-types:
+          - version-update:semver-major
