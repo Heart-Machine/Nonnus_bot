@@ -303,37 +303,61 @@ def build_ydl_opts(download_dir: Path, use_cookies: bool = True) -> dict[str, An
     return ydl_opts
 
 
-# The format a photo item of a story wears through StoryWithPhotosIE.
-PHOTO_PLACEHOLDER_FORMAT_ID = "nonnus-photo"
+class StoryIE(InstagramStoryIE):
+    """Stories and highlights from Instagram's API alone.
 
+    yt-dlp's own story extractor falls short twice. It reads the author from
+    the story's web page before anything else, and logged in, Instagram sends
+    that page to its home page instead - seen from the server on a live story
+    of an open account the bot follows, with a session the API accepted - so
+    it gives up with "This content is unreachable". And it keeps only the
+    items with video formats: a highlight tried held 95 items, 59 videos and
+    36 photos, and it returned the 59.
 
-class StoryWithPhotosIE(InstagramStoryIE):
-    """yt-dlp's story extractor, keeping the photos.
+    So here, with no page at all:
+    - one story is media/<id>/info, the request yt-dlp itself makes for a
+      post when logged in;
+    - a highlight is reels_media by its id;
+    - someone's current stories are their id by username, then reels_media.
 
-    It builds every item with _extract_product and then keeps only the ones
-    with `formats` - the videos. A highlight tried held 95 items, 59 videos
-    and 36 photos, and yt-dlp returned the 59. Here a photo item wears a
-    placeholder format for the length of the extraction, so it gets through
-    that check, and takes it off at the end: it comes out the way a post's
-    photo does, its pictures under `thumbnails` and no formats. Everything
-    else - the requests, the headers, the fixes each yt-dlp release brings -
-    stays yt-dlp's."""
+    Each item is still built by yt-dlp (_extract_product) and requested
+    through its machinery - cookies, headers, impersonation - and a photo
+    comes out the way a post's photo does: its pictures under thumbnails, no
+    formats. One request for a story or a highlight, two for someone's
+    stories, against the page and the API before - which counts, with an
+    account Instagram holds back quickly."""
 
     IE_NAME = "nonnus:instagram:story"
 
-    def _extract_product(self, *args, **kwargs):
-        info = super()._extract_product(*args, **kwargs)
-        if not info.get("formats") and info.get("thumbnails"):
-            info["formats"] = [{"format_id": PHOTO_PLACEHOLDER_FORMAT_ID, "url": info["thumbnails"][-1]["url"]}]
-        return info
+    def _api(self, path: str, item_id: str) -> Any:
+        return self._download_json(
+            f"{self._API_BASE_URL}/{path}", item_id, headers=self._api_headers,
+            impersonate=self._can_impersonate and self._is_web_app,
+        )
+
+    def _items(self, reel: dict[str, Any]) -> list[dict[str, Any]]:
+        return [self._extract_product(item, get_comments=False) for item in reel.get("items") or []]
 
     def _real_extract(self, url):
-        result = super()._real_extract(url)
-        for entry in [result, *((result or {}).get("entries") or [])]:
-            formats = (entry or {}).get("formats") or []
-            if [fmt.get("format_id") for fmt in formats] == [PHOTO_PLACEHOLDER_FORMAT_ID]:
-                entry["formats"] = []
-        return result
+        username, story_id = self._match_valid_url(url).group("user", "id")
+        if username == "highlights":
+            reel = ((self._api(f"feed/reels_media/?reel_ids=highlight:{story_id}", story_id) or {}).get("reels") or {}).get(
+                f"highlight:{story_id}"
+            ) or {}
+            return self.playlist_result(self._items(reel), story_id, reel.get("title"))
+
+        if story_id:
+            items = (self._api(f"media/{story_id}/info/", story_id) or {}).get("items") or []
+            if not items:
+                raise ExtractorError("Instagram has no such story", expected=True)
+            return self._extract_product(items[0], get_comments=False)
+
+        profile = self._api(f"users/web_profile_info/?username={username}", username) or {}
+        user_id = ((profile.get("data") or {}).get("user") or {}).get("id")
+        if not user_id:
+            raise ExtractorError(f"Instagram gave no id for {username}", expected=True)
+        reel = ((self._api(f"feed/reels_media/?reel_ids={user_id}", username) or {}).get("reels") or {}).get(str(user_id)) or {}
+        return self.playlist_result(self._items(reel), username, f"Story by {username}")
 
 
 def probe_post(url: str, download_dir: Path, use_cookies: bool = True) -> dict[str, Any]:
@@ -352,18 +376,13 @@ def probe_post(url: str, download_dir: Path, use_cookies: bool = True) -> dict[s
     anything process it, photo posts and mixed carousels come through."""
     ydl_opts = build_ydl_opts(download_dir, use_cookies)
     ydl_opts["ignore_no_formats_error"] = True
-    story = links.story_kind(url)
-    if story == links.STORY:
-        # One story. Left to the playlist setting, yt-dlp would bring all of
-        # the user's current ones.
-        ydl_opts["noplaylist"] = True
 
     with YoutubeDL(ydl_opts) as ydl:
-        if story is None:
+        if links.story_kind(url) is None:
             info = ydl.extract_info(url, download=False, process=False)
         else:
-            ydl.add_info_extractor(StoryWithPhotosIE())
-            info = ydl.extract_info(url, download=False, process=False, ie_key=StoryWithPhotosIE.ie_key())
+            ydl.add_info_extractor(StoryIE())
+            info = ydl.extract_info(url, download=False, process=False, ie_key=StoryIE.ie_key())
 
     if info and info.get("entries") is not None:
         # A generator would be used up by the first look at the entries,
