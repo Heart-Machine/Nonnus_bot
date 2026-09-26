@@ -112,6 +112,36 @@ def album_groups(items: list[Any], kind: Callable[[Any], str]) -> list[list[Any]
     return [chunk for run in runs for chunk in album_chunks(run)]
 
 
+# The Bot API takes a request of up to 60 MiB, found by asking: a request
+# announcing 62914560 bytes was let through, one byte more was turned away
+# with 413 Request Entity Too Large. An album uploads all its files in one
+# request, and a file can be up to 50 MB - so ten files from disk, which the
+# stories of one account easily are, would not fit.
+UPLOAD_REQUEST_LIMIT_BYTES = 60 * 1024 * 1024
+# What of a request is left for the files: the rest carries the part
+# headers, the list of media and the caption.
+ALBUM_UPLOAD_BYTES = UPLOAD_REQUEST_LIMIT_BYTES - 1024 * 1024
+
+
+def upload_groups(items: list[media.MediaItem]) -> list[list[media.MediaItem]]:
+    """album_groups for files uploaded from disk: an album whose files add up
+    to more than one request can carry is split further, in order. A part of
+    one file goes out as a message of its own, as a lone file does anyway."""
+    groups: list[list[media.MediaItem]] = []
+    for chunk in album_groups(items, lambda item: item.kind):
+        group: list[media.MediaItem] = []
+        group_bytes = 0
+        for item in chunk:
+            size = item.path.stat().st_size
+            if group and group_bytes + size > ALBUM_UPLOAD_BYTES:
+                groups.append(group)
+                group, group_bytes = [], 0
+            group.append(item)
+            group_bytes += size
+        groups.append(group)
+    return groups
+
+
 def build_input_media(kind: str, media: Any, caption: Optional[str]) -> InputMediaPhoto | InputMediaDocument | InputMediaVideo:
     if kind == "photo":
         return InputMediaPhoto(media=media, caption=caption, parse_mode=ParseMode.HTML)
@@ -304,7 +334,7 @@ async def upload_items_to_storage(
     without downloading or uploading the bytes again."""
     storage_chat_id = parse_storage_chat_id()
     uploaded: list[dict[str, str]] = []
-    for chunk in album_groups(items, lambda item: item.kind):
+    for chunk in upload_groups(items):
         if len(chunk) == 1:
             uploaded.append(
                 await upload_item_to_storage(context, storage_chat_id, chunk[0], caption if not uploaded else None)
@@ -438,7 +468,7 @@ async def send_cached_item(message, item: dict[str, str], caption: Optional[str]
 async def send_local_media_items(message, items: list[media.MediaItem], caption: str) -> None:
     """Send freshly downloaded files straight from disk - the path taken when
     no storage chat is configured, so there are no file_ids to reuse."""
-    for chunk_index, chunk in enumerate(album_groups(items, lambda item: item.kind)):
+    for chunk_index, chunk in enumerate(upload_groups(items)):
         chunk_caption = caption if chunk_index == 0 else None
         if len(chunk) == 1:
             await send_local_item(message, chunk[0], chunk_caption)

@@ -334,3 +334,77 @@ def test_an_eleven_file_carousel_sent_from_disk_has_no_album_of_one(tmp_path):
 
     assert [len(files) for kind, files in message.sent] == [6, 5]
     assert message.captions == ["caption", None]
+
+
+MIB = 1024 * 1024
+
+
+def sized_items(tmp_path, sizes_mib):
+    """Files of these sizes, in MiB, made without writing them out: a file
+    truncated to a size has it, and costs neither time nor disk."""
+    items = []
+    for n, size in enumerate(sizes_mib):
+        path = tmp_path / f"story-{n:02d}.jpg"
+        with path.open("wb") as file:
+            file.truncate(int(size * MIB))
+        items.append(media.MediaItem(path, "photo"))
+    return items
+
+
+def test_an_album_is_kept_within_what_one_request_can_carry(tmp_path):
+    # Ten stories of 8 MiB are 80 MiB; the Bot API turns away a request over
+    # 60 MiB with 413 Request Entity Too Large.
+    items = sized_items(tmp_path, [8] * 10)
+
+    groups = delivery.upload_groups(items)
+
+    assert [len(group) for group in groups] == [7, 3]
+    assert [item for group in groups for item in group] == items
+    assert all(sum(item.path.stat().st_size for item in group) <= 60 * MIB for group in groups)
+
+
+def test_files_that_fill_a_request_to_the_brim_leave_no_room_for_the_rest(tmp_path):
+    # 59.8 MiB of files would leave too little of the 60 for the part
+    # headers, the list of media and the caption.
+    items = sized_items(tmp_path, [29.9, 29.9])
+
+    assert delivery.upload_groups(items) == [[items[0]], [items[1]]]
+
+
+def test_a_file_bigger_than_a_request_goes_alone_and_leaves_no_empty_album(tmp_path):
+    # Not with the 50 MB a file is cut to now, but MAX_FILE_SIZE_MB can be
+    # raised - with a Bot API server of one's own, say.
+    items = sized_items(tmp_path, [70, 5])
+
+    assert delivery.upload_groups(items) == [[items[0]], [items[1]]]
+
+
+def test_files_small_enough_still_share_one_album(tmp_path):
+    items = sized_items(tmp_path, [5] * 10)
+
+    assert delivery.upload_groups(items) == [items]
+
+
+def test_an_album_too_big_for_one_request_uploads_to_storage_as_several(monkeypatch, tmp_path):
+    monkeypatch.setattr(config, "STORAGE_CHAT_ID", "-100")
+    albums = []
+
+    async def send_media_group(chat_id, media, **kwargs):
+        albums.append([item.media.filename for item in media])
+        return [SimpleNamespace(video=None, photo=[SimpleNamespace(file_id=f"f{n}")]) for n in range(len(media))]
+
+    context = SimpleNamespace(bot=SimpleNamespace(send_media_group=send_media_group))
+
+    uploaded = asyncio.run(delivery.upload_items_to_storage(context, sized_items(tmp_path, [8] * 10), "caption"))
+
+    assert albums == [[f"story-{n:02d}.jpg" for n in range(7)], [f"story-{n:02d}.jpg" for n in range(7, 10)]]
+    assert len(uploaded) == 10
+
+
+def test_an_album_too_big_for_one_request_sent_from_disk_as_several(tmp_path):
+    message = RecordingMessage()
+
+    asyncio.run(delivery.send_local_media_items(message, sized_items(tmp_path, [8] * 10), "caption"))
+
+    assert [len(files) for kind, files in message.sent] == [7, 3]
+    assert message.captions == ["caption", None]
