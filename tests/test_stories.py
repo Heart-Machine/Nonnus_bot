@@ -97,21 +97,28 @@ def story_item(pk, video):
 
 @pytest.fixture
 def instagram_answers(monkeypatch):
-    """The two requests yt-dlp's story extractor makes - the page, for the
-    user, and the reels_media API - answered with a video and a photo.
+    """Instagram's API, answering the bot's story extractor with a video and a
+    photo: one story by its id, a user's id by username, and reels_media for
+    a highlight and for the user's current stories.
 
-    Replaced on yt-dlp's own extractor, which the bot's inherits from: a story
-    that went to yt-dlp's extractor by mistake would still stay off the
-    network - and lose its photo, which is what the tests would catch."""
+    The story's web page is not to be asked for at all: logged in, Instagram
+    sends it to the home page. Replaced on yt-dlp's own extractor, which the
+    bot's inherits from, so a story sent to yt-dlp's extractor by mistake
+    would still stay off the network - and ask for the page, which fails the
+    test."""
     asked = []
 
     def download_webpage(self, url, video_id, *args, **kwargs):
-        asked.append(url)
-        return 'window.data = {"user":{"pk":"42","id":"42","username":"some.one"}};'
+        raise AssertionError(f"the story's web page was asked for: {url}")
 
     def download_json(self, url, video_id, *args, **kwargs):
         asked.append(url)
         items = [story_item(STORY_PK, video=True), story_item(PHOTO_PK, video=False)]
+        if "/media/" in url:
+            pk = url.split("/media/")[1].split("/")[0]
+            return {"items": [item for item in items if item["pk"] == pk]}
+        if "web_profile_info" in url:
+            return {"data": {"user": {"id": "42", "username": "some.one"}}}
         return {"reels": {
             f"highlight:{HIGHLIGHT_ID}": {"title": "Trip", "user": dict(USER), "items": items},
             "42": {"user": dict(USER), "items": [dict(item) for item in items]},
@@ -136,16 +143,45 @@ def test_a_highlight_keeps_its_photos(instagram_answers, tmp_path):
 def test_a_story_link_brings_that_one_story(instagram_answers, tmp_path):
     info = instagram.probe_post(f"https://www.instagram.com/stories/some.one/{PHOTO_PK}/", tmp_path, use_cookies=False)
 
-    # The photo alone - not the playlist of all the user's current stories.
+    # The photo alone - not the playlist of all the user's current stories -
+    # asked for by its id, in one request.
     assert "entries" not in info
     assert info["formats"] == []
     assert instagram.best_photo_url(info) == f"https://cdn.example/{PHOTO_PK}.jpg"
+    assert info["channel"] == "some.one"
+    assert [url.split("/api/v1/")[1] for url in instagram_answers] == [f"media/{PHOTO_PK}/info/"]
+
+
+def test_a_story_that_is_gone_is_said_to_be(monkeypatch, tmp_path):
+    monkeypatch.setattr(instagram.InstagramStoryIE, "_download_json", lambda self, url, video_id, *a, **k: {"items": []})
+
+    with pytest.raises(instagram.YoutubeDLError, match="no such story"):
+        instagram.probe_post(f"https://www.instagram.com/stories/some.one/{STORY_PK}/", tmp_path, use_cookies=False)
+
+
+def test_a_highlight_takes_one_request(instagram_answers, tmp_path):
+    instagram.probe_post(f"https://www.instagram.com/stories/highlights/{HIGHLIGHT_ID}/", tmp_path, use_cookies=False)
+
+    assert [url.split("/api/v1/")[1] for url in instagram_answers] == [
+        f"feed/reels_media/?reel_ids=highlight:{HIGHLIGHT_ID}"
+    ]
 
 
 def test_a_user_s_stories_are_all_of_them(instagram_answers, tmp_path):
     info = instagram.probe_post("https://www.instagram.com/stories/some.one/", tmp_path, use_cookies=False)
 
     assert len(instagram.post_entries(info)) == 2
+    assert [url.split("/api/v1/")[1] for url in instagram_answers] == [
+        "users/web_profile_info/?username=some.one",
+        "feed/reels_media/?reel_ids=42",
+    ]
+
+
+def test_someone_instagram_gives_no_id_for_is_not_guessed(monkeypatch, tmp_path):
+    monkeypatch.setattr(instagram.InstagramStoryIE, "_download_json", lambda self, url, video_id, *a, **k: {"data": {}})
+
+    with pytest.raises(instagram.YoutubeDLError, match="no id for some.one"):
+        instagram.probe_post("https://www.instagram.com/stories/some.one/", tmp_path, use_cookies=False)
 
 
 def test_posts_still_go_to_yt_dlp_s_own_extractor(monkeypatch, tmp_path):
