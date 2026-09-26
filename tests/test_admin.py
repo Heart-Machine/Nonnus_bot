@@ -4,7 +4,9 @@ from types import SimpleNamespace
 
 import pytest
 
-from nonnus import admin, app, config, users
+from telegram.error import BadRequest
+
+from nonnus import admin, app, config, handlers, menu, users
 
 OWNER = SimpleNamespace(id=100, username="owner", first_name="Owner")
 HELPER = SimpleNamespace(id=200, username="helper", first_name="Helper")
@@ -21,9 +23,27 @@ class Message:
         self.replies.append(text)
 
 
-def command(handler, sender, *args, chat_type="private"):
+class MenuBot:
+    """Records the menus set and taken away, by chat; refuses the chats in
+    `refuse` the way Telegram refuses one the user never opened."""
+
+    def __init__(self, refuse=()):
+        self.menus = []
+        self.refuse = set(refuse)
+
+    async def set_my_commands(self, commands, scope=None):
+        if scope is not None and scope.chat_id in self.refuse:
+            raise BadRequest("Chat not found")
+        self.menus.append(("set", scope.chat_id, [command.command for command in commands]))
+
+    async def delete_my_commands(self, scope=None):
+        self.menus.append(("delete", scope.chat_id, None))
+
+
+def command(handler, sender, *args, chat_type="private", bot=None):
     message = Message(sender, chat_type)
-    asyncio.run(handler(SimpleNamespace(message=message), SimpleNamespace(args=list(args))))
+    context = SimpleNamespace(args=list(args), bot=bot or MenuBot())
+    asyncio.run(handler(SimpleNamespace(message=message), context))
     return message.replies
 
 
@@ -118,6 +138,79 @@ def test_users_lists_the_admins_and_premium_users(monkeypatch):
     assert admins == "Админы:\n• @owner (Owner), ID 100 — из настроек\n• ID 200\n• ID 400 — из настроек"
     assert premium == "Премиум:\n• @Someone (Some), ID 300"
     assert total == "Всего пользователей в базе: 3"
+
+
+# --- the admin menu ----------------------------------------------------------
+
+
+ADMIN_MENU = ["start", "role", "users", "chatid"]
+
+
+def test_making_someone_an_admin_gives_them_the_admin_menu():
+    bot = MenuBot()
+
+    command(admin.role, OWNER, "@someone", "admin", bot=bot)
+
+    assert bot.menus == [("set", SOMEONE.id, ADMIN_MENU)]
+
+
+def test_an_admin_made_something_else_loses_it():
+    users.USER_STORE.set_role(SOMEONE.id, users.ADMIN)
+    bot = MenuBot()
+
+    command(admin.role, OWNER, "@someone", "premium", bot=bot)
+
+    assert bot.menus == [("delete", SOMEONE.id, None)]
+
+
+@pytest.mark.parametrize("before, after", [(users.REGULAR, "premium"), (users.PREMIUM, "regular"), (users.ADMIN, "admin")])
+def test_other_changes_leave_the_menu_alone(before, after):
+    users.USER_STORE.set_role(SOMEONE.id, before)
+    bot = MenuBot()
+
+    command(admin.role, OWNER, "@someone", after, bot=bot)
+
+    assert bot.menus == []
+
+
+def test_a_menu_telegram_refuses_is_not_an_error():
+    # Someone who never wrote to the bot has no chat to set a menu for.
+    [reply] = command(admin.role, OWNER, "555", "admin", bot=MenuBot(refuse={555}))
+
+    assert reply.startswith("Готово")
+
+
+def test_start_gives_an_admin_their_menu_and_nobody_else(monkeypatch):
+    monkeypatch.setattr(config, "ADMIN_USER_IDS", frozenset({OWNER.id}))
+    bot = MenuBot()
+
+    for sender, chat_type in ((OWNER, "private"), (SOMEONE, "private"), (OWNER, "supergroup")):
+        command(menu.on_start, sender, chat_type=chat_type, bot=bot)
+
+    assert bot.menus == [("set", OWNER.id, ADMIN_MENU)]
+
+
+def test_one_admin_telegram_refuses_does_not_keep_the_others_from_their_menus(monkeypatch):
+    monkeypatch.setattr(config, "ADMIN_USER_IDS", frozenset({100, 200}))
+    bot = MenuBot(refuse={100})
+
+    asyncio.run(menu.show_admin_menus(bot))
+
+    assert bot.menus == [("set", 200, ADMIN_MENU)]
+
+
+def test_start_goes_to_both_the_help_and_the_menu():
+    # Two handlers for one command run only from different groups: in one
+    # group the first that matches is the only one.
+    groups = {
+        handler.callback: group
+        for group, group_handlers in app.build_application("1:test").handlers.items()
+        for handler in group_handlers
+        if "start" in getattr(handler, "commands", ())
+    }
+
+    assert set(groups) == {handlers.start, menu.on_start}
+    assert groups[handlers.start] != groups[menu.on_start]
 
 
 def test_the_application_has_the_admin_commands():

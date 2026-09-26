@@ -13,7 +13,7 @@ from typing import Any, Optional
 from telegram import Update
 from telegram.ext import ContextTypes
 
-from nonnus import config, users
+from nonnus import config, menu, users
 
 
 logger = logging.getLogger(__name__)
@@ -111,6 +111,7 @@ async def role(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             )
             return
 
+        old_role = users.role_of(user_id)
         users.USER_STORE.set_role(user_id, new_role)
     except (sqlite3.Error, OSError):
         logger.exception("Failed to look up or change a role")
@@ -118,6 +119,7 @@ async def role(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     logger.info("Admin %s set the role of user %s to %s", message.from_user.id, user_id, new_role)
+    await menu.after_role_change(context.bot, user_id, old_role, new_role)
     await message.reply_text(f"Готово: {who} — теперь {ROLE_TITLES[new_role]}.")
 
 

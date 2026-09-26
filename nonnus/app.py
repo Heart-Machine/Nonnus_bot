@@ -4,7 +4,7 @@ import logging
 import re
 from typing import Any
 
-from telegram import BotCommand, Update
+from telegram import Update
 from telegram.error import TelegramError
 from telegram.ext import (
     Application,
@@ -16,7 +16,7 @@ from telegram.ext import (
     filters,
 )
 
-from nonnus import config, inline, handlers, admin, canary
+from nonnus import config, inline, handlers, admin, canary, menu
 
 
 LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s: %(message)s"
@@ -96,11 +96,7 @@ async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
 # What Telegram shows about the bot, kept here rather than typed into BotFather
 # so it lives in the repository with everything else. It is set on every
 # start, which also means an edit made in BotFather lasts until the next one.
-#
-# /chatid stays out of the menu: it is for setting up the storage chat, not
-# something users need.
-BOT_COMMANDS = [BotCommand("start", "Как пользоваться ботом")]
-
+# The command menus are in menu.py.
 BOT_SHORT_DESCRIPTION = "Пришли ссылку на рилс, фото или карусель из Instagram - пришлю их сюда."
 
 BOT_DESCRIPTION = (
@@ -115,11 +111,11 @@ BOT_DESCRIPTION = (
 
 
 async def publish_bot_profile(bot: Any) -> None:
-    """Set the command menu and the descriptions. Each on its own, and a
+    """Set the command menus and the descriptions. Each on its own, and a
     failure only logged: a bot with a stale description still works, a bot
     that would not start over one does not."""
     for what, call in (
-        ("command menu", lambda: bot.set_my_commands(BOT_COMMANDS)),
+        ("command menu", lambda: bot.set_my_commands(menu.EVERYONE)),
         ("short description", lambda: bot.set_my_short_description(BOT_SHORT_DESCRIPTION)),
         ("description", lambda: bot.set_my_description(BOT_DESCRIPTION)),
     ):
@@ -127,6 +123,8 @@ async def publish_bot_profile(bot: Any) -> None:
             await call()
         except TelegramError:
             logger.warning("Failed to set the bot's %s", what, exc_info=True)
+
+    await menu.show_admin_menus(bot)
 
 
 async def start_background_jobs(application: Application) -> None:
@@ -154,6 +152,9 @@ def build_application(token: str) -> Application:
         .build()
     )
     app.add_handler(CommandHandler("start", handlers.start))
+    # A group of its own, so it runs as well as handlers.start rather than
+    # instead of it: in one group only the first handler that matches does.
+    app.add_handler(CommandHandler("start", menu.on_start), group=1)
     app.add_handler(CommandHandler("chatid", handlers.chatid))
     app.add_handler(CommandHandler("role", admin.role))
     app.add_handler(CommandHandler("users", admin.list_users))
