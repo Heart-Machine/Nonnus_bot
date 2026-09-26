@@ -209,6 +209,35 @@ def test_a_post_failing_both_ways_is_blamed_on_the_post(monkeypatch, session, tm
     assert session.take_alert() is False
 
 
+@pytest.mark.parametrize(
+    "url", ["https://www.instagram.com/stories/some.one/3994224585897789830/", "https://www.instagram.com/stories/some.one/"]
+)
+def test_a_story_is_not_asked_for_again_without_the_cookies(monkeypatch, session, tmp_path, url):
+    # Instagram shows stories logged in only: a second try without the
+    # cookies is one more request for nothing.
+    cookie_error = DownloadError("HTTP Error 429: Too Many Requests")
+    tried = fake_probe(monkeypatch, with_cookies=cookie_error, without_cookies=AssertionError("not reached"))
+
+    with pytest.raises(DownloadError) as raised:
+        instagram.probe_post_with_fallback(url, tmp_path)
+
+    assert raised.value is cookie_error
+    assert tried == ["cookies"]
+    # Nothing is said of the cookies either way.
+    assert session.use_cookies() is True
+    assert session.take_alert() is False
+
+
+def test_a_highlight_is_still_tried_without_the_cookies(monkeypatch, session, tmp_path):
+    # Some accounts' highlights open logged out.
+    tried = fake_probe(monkeypatch, with_cookies=DownloadError("login required"), without_cookies=INFO)
+
+    highlight = "https://www.instagram.com/stories/highlights/18000000000000042/"
+
+    assert instagram.probe_post_with_fallback(highlight, tmp_path) == (INFO, False)
+    assert tried == ["cookies", "anonymous"]
+
+
 def test_suspended_cookies_are_not_even_tried(monkeypatch, session, tmp_path):
     reject_in_a_row(session)
     session.take_alert()

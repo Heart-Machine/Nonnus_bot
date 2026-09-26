@@ -25,7 +25,7 @@ from yt_dlp import YoutubeDL
 from yt_dlp.extractor.instagram import InstagramStoryIE
 from yt_dlp.utils import ExtractorError, YoutubeDLError
 
-from nonnus import config, links, media, progress
+from nonnus import cache, config, links, media, progress
 
 
 logger = logging.getLogger(__name__)
@@ -318,14 +318,15 @@ class StoryIE(InstagramStoryIE):
     - one story is media/<id>/info, the request yt-dlp itself makes for a
       post when logged in;
     - a highlight is reels_media by its id;
-    - someone's current stories are their id by username, then reels_media.
+    - someone's current stories are reels_media by their account id, which
+      is kept once known (cache.AccountIds) and else found by username.
 
     Each item is still built by yt-dlp (_extract_product) and requested
     through its machinery - cookies, headers, impersonation - and a photo
     comes out the way a post's photo does: its pictures under thumbnails, no
-    formats. One request for a story or a highlight, two for someone's
-    stories, against the page and the API before - which counts, with an
-    account Instagram holds back quickly."""
+    formats. One request for a story or a highlight, and for someone's
+    stories once their id is known - which counts, with an account Instagram
+    holds back quickly."""
 
     IE_NAME = "nonnus:instagram:story"
 
@@ -338,25 +339,85 @@ class StoryIE(InstagramStoryIE):
     def _items(self, reel: dict[str, Any]) -> list[dict[str, Any]]:
         return [self._extract_product(item, get_comments=False) for item in reel.get("items") or []]
 
+    @staticmethod
+    def _keep_owner_id(user: Any) -> None:
+        """Keep the id of the account a story or a highlight came from: asked
+        for all their stories later, the bot has no lookup to make."""
+        if isinstance(user, dict) and user.get("username") and (user.get("pk") or user.get("id")):
+            cache.remember_account_id(user["username"], str(user.get("pk") or user.get("id")))
+
+    def _account_reel(self, user_id: str, username: str) -> dict[str, Any]:
+        answer = self._api(f"feed/reels_media/?reel_ids={user_id}", username) or {}
+        return (answer.get("reels") or {}).get(str(user_id)) or {}
+
+    @staticmethod
+    def _someone_else_s(reel: dict[str, Any], username: str) -> bool:
+        owner = str((reel.get("user") or {}).get("username") or "")
+        return bool(owner) and owner.lower() != username.lower()
+
+    def _find_account_id(self, username: str) -> str:
+        """Someone's account id, found the way gallery-dl finds it: Instagram's
+        search, then the profile page, which carries it as profile_id and
+        also has the accounts the search leaves out.
+
+        Not web_profile_info, which this was asked of before. From the server
+        it answered 429 with the session and without it alike, while a post
+        went through on the same session within a minute; gallery-dl users
+        have seen the same since February 2026, and gallery-dl moved to the
+        search and the page. The search and the page were tried from the
+        server on that same account and both gave its id."""
+        # The warnings carry yt-dlp's own words without its plea to report a bug:
+        # a refusal from Instagram is not one.
+        try:
+            found = self._download_json(
+                f"{self._BASE_URL}web/search/topsearch/?query={username}", username, "Looking the account up",
+                headers=self._api_headers, impersonate=self._can_impersonate and self._is_web_app,
+            )
+        except ExtractorError as error:
+            logger.warning("Instagram's search failed for %s: %s", username, error.orig_msg)
+            found = None
+        for entry in (found or {}).get("users") or []:
+            user = entry.get("user") or {}
+            if str(user.get("username") or "").lower() == username.lower() and user.get("pk"):
+                return str(user["pk"])
+
+        try:
+            page = self._download_webpage(f"{self._BASE_URL}{username}/", username, "Reading the profile page")
+        except ExtractorError as error:
+            logger.warning("Instagram's profile page failed for %s: %s", username, error.orig_msg)
+            page = ""
+        profile_id = re.search(r'"profile_id":"(\d+)"', page or "")
+        if profile_id:
+            return profile_id.group(1)
+
+        raise ExtractorError(f"Instagram gave no id for {username}", expected=True)
+
     def _real_extract(self, url):
         username, story_id = self._match_valid_url(url).group("user", "id")
         if username == "highlights":
             reel = ((self._api(f"feed/reels_media/?reel_ids=highlight:{story_id}", story_id) or {}).get("reels") or {}).get(
                 f"highlight:{story_id}"
             ) or {}
+            self._keep_owner_id(reel.get("user"))
             return self.playlist_result(self._items(reel), story_id, reel.get("title"))
 
         if story_id:
             items = (self._api(f"media/{story_id}/info/", story_id) or {}).get("items") or []
             if not items:
                 raise ExtractorError("Instagram has no such story", expected=True)
+            self._keep_owner_id(items[0].get("user"))
             return self._extract_product(items[0], get_comments=False)
 
-        profile = self._api(f"users/web_profile_info/?username={username}", username) or {}
-        user_id = ((profile.get("data") or {}).get("user") or {}).get("id")
-        if not user_id:
-            raise ExtractorError(f"Instagram gave no id for {username}", expected=True)
-        reel = ((self._api(f"feed/reels_media/?reel_ids={user_id}", username) or {}).get("reels") or {}).get(str(user_id)) or {}
+        user_id = cache.known_account_id(username)
+        reel = self._account_reel(user_id, username) if user_id else None
+        # Stories under another name: the username has passed to someone
+        # else since its id was kept. With no stories there is no name to
+        # tell by, and the kept id stands.
+        if reel is None or self._someone_else_s(reel, username):
+            found = self._find_account_id(username)
+            if found != user_id:
+                reel = self._account_reel(found, username)
+            cache.remember_account_id(username, found)
         return self.playlist_result(self._items(reel), username, f"Story by {username}")
 
 
@@ -398,10 +459,10 @@ def probe_post(url: str, download_dir: Path, use_cookies: bool = True) -> dict[s
 T = TypeVar("T")
 
 
-def with_cookie_fallback(url: str, attempt: Callable[[bool], T]) -> Tuple[T, bool]:
+def with_cookie_fallback(url: str, attempt: Callable[[bool], T], fall_back: bool = True) -> Tuple[T, bool]:
     """Run attempt(use_cookies) with the session cookies while they are
-    trusted, and again without them when that fails. Returns the result and
-    whether the cookies were used.
+    trusted, and again without them when that fails - unless told not to
+    fall back. Returns the result and whether the cookies were used.
 
     Only the probe goes through this - it is the one request to Instagram's
     API a post takes. The videos are downloaded from what the probe returned,
@@ -412,6 +473,8 @@ def with_cookie_fallback(url: str, attempt: Callable[[bool], T]) -> Tuple[T, boo
     try:
         result = attempt(True)
     except YoutubeDLError as cookie_error:
+        if not fall_back:
+            raise
         try:
             result = attempt(False)
         except YoutubeDLError:
@@ -439,8 +502,21 @@ def with_cookie_fallback(url: str, attempt: Callable[[bool], T]) -> Tuple[T, boo
     return result, False
 
 
+# Instagram shows a story, and someone's current stories, only to an account
+# that is logged in. Without the cookies they can't come through, so they are
+# not asked for again without them: that would be one more request from the
+# server's address, for nothing, to an Instagram that counts them. A
+# highlight is still tried without them: some accounts' highlights open
+# logged out.
+LOGIN_ONLY_STORY_KINDS = (links.STORY, links.STORIES)
+
+
 def probe_post_with_fallback(url: str, download_dir: Path) -> Tuple[dict[str, Any], bool]:
-    return with_cookie_fallback(url, lambda use_cookies: probe_post(url, download_dir, use_cookies))
+    return with_cookie_fallback(
+        url,
+        lambda use_cookies: probe_post(url, download_dir, use_cookies),
+        fall_back=links.story_kind(url) not in LOGIN_ONLY_STORY_KINDS,
+    )
 
 
 def post_entries(info: dict[str, Any]) -> list[dict[str, Any]]:
