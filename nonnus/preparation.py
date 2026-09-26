@@ -14,7 +14,7 @@ from typing import Any, Optional, Tuple
 from telegram.error import TelegramError
 from telegram.ext import ContextTypes
 
-from nonnus import config, links, media, instagram, cache, delivery, progress
+from nonnus import config, links, media, instagram, cache, delivery, progress, users
 
 
 logger = logging.getLogger(__name__)
@@ -181,6 +181,7 @@ def get_or_create_prepare_task(
     url: str,
     context: ContextTypes.DEFAULT_TYPE,
     reuse_failure: bool = False,
+    user: Any = None,
 ) -> asyncio.Task:
     """Reuse an in-flight prepare_inline_post() task for the same post so
     concurrent requests - inline queries and direct messages alike - don't
@@ -190,13 +191,19 @@ def get_or_create_prepare_task(
     and with reuse_failure it is what comes back - already done, so the
     inline query answers with the error at once instead of downloading again.
     A link sent to the bot directly is someone asking for another try, so
-    without reuse_failure a failed task is replaced by a new one."""
+    without reuse_failure a failed task is replaced by a new one.
+
+    A new task is a new download from Instagram, the one thing the daily
+    limit counts: it goes on `user`'s count, or raises
+    users.DailyLimitReached, and is given back if the task fails. Joining a
+    task under way costs nothing - that download is already happening."""
     cache_key = links.normalize_post_url(url)
     inline_tasks = context.application.bot_data.setdefault("inline_tasks", {})
     task = inline_tasks.get(cache_key)
     if task is not None and (not task.done() or reuse_failure):
         return task
 
+    download = users.take_download(user)
     tracker = progress.Progress(asyncio.get_running_loop())
     task = context.application.create_task(prepare_inline_post(url, context, tracker))
     TRACKERS[task] = tracker
@@ -207,6 +214,9 @@ def get_or_create_prepare_task(
             inline_tasks.pop(key, None)
 
     def on_done(done_task: asyncio.Task) -> None:
+        if done_task.cancelled() or done_task.exception() is not None:
+            users.give_back_download(download)
+
         # A post that came through is in the cache now, so its task has
         # nothing more to offer; a failed one is kept a while as the answer.
         if done_task.cancelled() or done_task.exception() is None:

@@ -19,6 +19,9 @@ os.environ["STORAGE_CHAT_ID"] = ""
 os.environ["MAX_FILE_SIZE_MB"] = "50"
 os.environ["PHOTO_MAX_FILE_SIZE_MB"] = "10"
 os.environ["ENABLE_VIDEO_COMPRESSION"] = "true"
+os.environ["ADMIN_USER_IDS"] = ""
+os.environ["DAILY_DOWNLOAD_LIMIT"] = "5"
+os.environ["DAILY_LIMIT_TIMEZONE"] = "Europe/Moscow"
 
 
 @pytest.fixture(autouse=True)
@@ -30,5 +33,16 @@ def post_cache(monkeypatch, tmp_path):
 
     fresh = cache.PostCache(tmp_path / "inline_cache.sqlite3")
     monkeypatch.setattr(cache, "POST_CACHE", fresh)
+    yield fresh
+    fresh.close()
+
+
+@pytest.fixture(autouse=True)
+def user_store(monkeypatch, tmp_path):
+    """A users database of its own for every test, for the same reasons."""
+    from nonnus import users
+
+    fresh = users.UserStore(tmp_path / "users.sqlite3")
+    monkeypatch.setattr(users, "USER_STORE", fresh)
     yield fresh
     fresh.close()

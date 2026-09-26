@@ -26,5 +26,7 @@ python-telegram-bot==22.8
     # via -r requirements.in
 typing-extensions==4.16.0
     # via anyio
+tzdata==2026.4
+    # via -r requirements.in
 yt-dlp==2026.8.19
     # via -r requirements.in

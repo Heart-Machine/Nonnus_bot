@@ -103,6 +103,7 @@ class Status:
 
 class Message:
     chat_id = 1
+    from_user = SimpleNamespace(id=1, username="someone", first_name="Someone")
 
     def __init__(self):
         self.status = Status()
@@ -203,6 +204,7 @@ class InlineQuery:
 
     def __init__(self, refusals=0, error=DEAD_FILE_ID):
         self.query = POST_URL
+        self.from_user = SimpleNamespace(id=1, username="someone", first_name="Someone")
         self.answers = []
         self.refusals = refusals
         self.error = error
@@ -328,7 +330,8 @@ def test_a_placeholder_swap_refused_over_dead_files_drops_them(world, monkeypatc
         bot = SimpleNamespace(edit_message_media=edit_message_media)
         context = Context(asyncio.get_running_loop(), bot=bot)
         chosen = SimpleNamespace(
-            result_id=inline.inline_result_id(POST_URL), inline_message_id="inline-1", query=POST_URL
+            result_id=inline.inline_result_id(POST_URL), inline_message_id="inline-1", query=POST_URL,
+            from_user=SimpleNamespace(id=1, username="someone", first_name="Someone"),
         )
         await inline.handle_chosen_inline_result(SimpleNamespace(chosen_inline_result=chosen), context)
 

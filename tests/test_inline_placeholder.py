@@ -85,8 +85,8 @@ def answer_inline_query(monkeypatch, url, picture):
     async def run():
         # A preparation still under way.
         pending = asyncio.get_running_loop().create_future()
-        monkeypatch.setattr(preparation, "get_or_create_prepare_task", lambda url, context, reuse_failure=False: pending)
-        query = SimpleNamespace(query=url, answer=answer)
+        monkeypatch.setattr(preparation, "get_or_create_prepare_task", lambda url, context, reuse_failure=False, user=None: pending)
+        query = SimpleNamespace(query=url, answer=answer, from_user=SimpleNamespace(id=1, username="someone", first_name="Someone"))
         await inline.handle_inline_query(SimpleNamespace(inline_query=query), SimpleNamespace())
 
     asyncio.run(run())

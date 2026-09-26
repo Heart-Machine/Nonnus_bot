@@ -329,6 +329,7 @@ class Chat:
     """A chat the link came from: hands out the status message."""
 
     chat_id = 1
+    from_user = SimpleNamespace(id=1, username="someone", first_name="Someone")
 
     def __init__(self):
         self.status = RecordedMessage()
@@ -448,7 +449,8 @@ def choose_the_placeholder(monkeypatch, settle_for=0.0):
         context = SimpleNamespace(application=SimpleNamespace(bot_data={}, create_task=loop.create_task), bot=bot)
         update = SimpleNamespace(
             chosen_inline_result=SimpleNamespace(
-                result_id=inline.inline_result_id(POST_URL), inline_message_id="inline-message", query=POST_URL
+                result_id=inline.inline_result_id(POST_URL), inline_message_id="inline-message", query=POST_URL,
+                from_user=SimpleNamespace(id=1, username="someone", first_name="Someone"),
             )
         )
         await inline.handle_chosen_inline_result(update, context)

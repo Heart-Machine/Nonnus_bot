@@ -54,6 +54,7 @@ async def settle(context):
 
 class InlineQuery:
     query = POST_URL
+    from_user = SimpleNamespace(id=1, username="someone", first_name="Someone")
 
     async def answer(self, results, **kwargs):
         pass
@@ -98,6 +99,7 @@ def test_a_link_sent_to_the_bot_logs_one_line_for_a_failed_preparation(failing_p
 
     class Message:
         chat_id = 1
+        from_user = SimpleNamespace(id=1, username="someone", first_name="Someone")
 
         async def reply_text(self, text, **kwargs):
             return Status()

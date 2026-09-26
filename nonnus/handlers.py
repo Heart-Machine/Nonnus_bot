@@ -12,7 +12,7 @@ from telegram.constants import ChatAction, ParseMode
 from telegram.error import NetworkError, TelegramError, TimedOut
 from telegram.ext import ContextTypes
 
-from nonnus import config, links, media, instagram, cache, delivery, preparation, progress, status_message
+from nonnus import config, links, media, instagram, cache, delivery, preparation, progress, status_message, users
 
 
 logger = logging.getLogger(__name__)
@@ -71,6 +71,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if message is None:
         return
 
+    users.remember(message.from_user)
+
     # The button under an inline carousel opens t.me/<bot>?start=<payload>,
     # which arrives here as /start <payload>.
     if context.args:
@@ -79,10 +81,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             await deliver_post(message, url, context)
             return
 
-    await message.reply_text(
-        "Пришли ссылку на Instagram — Reel, пост с фото или карусель, "
-        "а я отправлю всё содержимое сюда."
-    )
+    text = "Пришли ссылку на Instagram — Reel, пост с фото или карусель, а я отправлю всё содержимое сюда."
+    note = users.limit_note(message.from_user)
+    await message.reply_text(f"{text}\n\n{note}" if note else text)
 
 
 async def chatid(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -101,6 +102,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if not await is_message_addressed_to_bot(update, context):
         return
 
+    users.remember(message.from_user)
     url = links.find_instagram_url(message.text)
     if not url:
         await message.reply_text(
@@ -171,7 +173,11 @@ async def _deliver_post(message, url: str, context: ContextTypes.DEFAULT_TYPE, s
         # task inline queries use, so concurrent requests for the same URL
         # - from any chat - share one download/encode instead of each
         # running their own. Each of them follows its progress.
-        task = preparation.get_or_create_prepare_task(url, context)
+        try:
+            task = preparation.get_or_create_prepare_task(url, context, user=message.from_user)
+        except users.DailyLimitReached as error:
+            await status.fail(users.limit_reached_text(error))
+            return
         status.follow(preparation.progress_of(task))
         # A failed preparation's traceback is logged once, from the task
         # itself; here, a line on what the user was told.
@@ -220,6 +226,11 @@ async def _deliver_post(message, url: str, context: ContextTypes.DEFAULT_TYPE, s
     # Legacy path for setups without STORAGE_CHAT_ID: download and send
     # straight to this chat, without the shared cache/dedup above. Its
     # progress is reported from this handler's own task.
+    try:
+        download = users.take_download(message.from_user)
+    except users.DailyLimitReached as error:
+        await status.fail(users.limit_reached_text(error))
+        return
     tracker = progress.Progress(asyncio.get_running_loop())
     status.follow(tracker)
     token = progress.CURRENT.set(tracker)
@@ -227,15 +238,19 @@ async def _deliver_post(message, url: str, context: ContextTypes.DEFAULT_TYPE, s
     try:
         try:
             items, caption = await preparation.download_post_in_thread(url, temp_dir, context)
+        # A post that could not be downloaded does not use up the limit.
         except instagram.NoMediaInPostError:
+            users.give_back_download(download)
             logger.info("No downloadable media in post %s", url)
             await status.fail("В этой публикации нет ни видео, ни фото, которые я могу скачать.")
             return
         except instagram.IncompletePostError:
+            users.give_back_download(download)
             logger.exception("Could not fetch all of %s", url)
             await status.fail(INCOMPLETE_POST_TEXT)
             return
         except Exception:
+            users.give_back_download(download)
             logger.exception("Failed to download %s", url)
             await status.fail(
                 "Не получилось скачать публикацию. Возможно, она закрытая или удалена. "
