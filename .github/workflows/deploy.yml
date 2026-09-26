@@ -24,11 +24,11 @@ permissions:
 #
 # What a new push does to the run before it, as a throwaway workflow showed:
 # a job that has not started yet is cancelled within a second of the push
-# (tried on one waiting for a runner; a deploy parked on approval has not
-# started either); a job already running is not cut off, but finishes, and
-# the run is cancelled before its next job, the new run waiting meanwhile.
-# So a push during a deploy lets it complete, then ships itself after
-# approval.
+# (tried on one waiting for a runner, and seen on a deploy parked on
+# approval: a merge cancelled it the same second); a job already running is
+# not cut off, but finishes, and the run is cancelled before its next job,
+# the new run waiting meanwhile. So a push during a deploy lets it complete,
+# then ships itself after approval.
 concurrency:
   group: production-deploy
   cancel-in-progress: true
