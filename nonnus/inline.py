@@ -291,7 +291,7 @@ async def handle_inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE
                     "help",
                     "Пришли ссылку на Instagram",
                     "Напиши: @bot_username https://www.instagram.com/reel/...",
-                    "Пришли ссылку на Reel или пост после имени бота.",
+                    "Пришли ссылку на Reel, пост, сторис или хайлайт после имени бота.",
                 )
             ],
             cache_time=0,
@@ -317,6 +317,15 @@ async def handle_inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE
         )
         return
     url = post_url
+
+    refusal = users.refusal_for(inline_query.from_user, url)
+    if refusal:
+        await inline_query.answer(
+            [build_inline_article(inline_result_id(url), "Только для премиум", "Все сторис аккаунта разом", refusal)],
+            cache_time=0,
+            is_personal=True,
+        )
+        return
 
     cached_result = cache.get_cached_inline_result(url)
     if cached_result:

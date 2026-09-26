@@ -14,7 +14,7 @@ from datetime import datetime, time, timedelta
 from pathlib import Path
 from typing import Any, Optional
 
-from nonnus import config
+from nonnus import config, links
 
 
 logger = logging.getLogger(__name__)
@@ -194,6 +194,27 @@ def role_of(user_id: int) -> str:
 
 def is_admin(user: Any) -> bool:
     return user is not None and role_of(user.id) == ADMIN
+
+
+STORIES_FOR_PREMIUM_TEXT = (
+    "Все сторис аккаунта разом скачивают только премиум-пользователи. "
+    "Пришли ссылку на конкретную сторис или на хайлайт - их может скачать любой."
+)
+
+
+def refusal_for(user: Any, url: str) -> Optional[str]:
+    """Why `user` may not have `url`, or None when they may.
+
+    All of someone's current stories at once - /stories/<username>/ - are
+    for premium users and admins; a single story and a highlight are for
+    everyone. It holds for the cache too: this is what the role gives, not
+    what the download costs. Nobody to ask about - a channel post has no
+    sender - is refused like a regular user."""
+    if links.story_kind(url) != links.STORIES:
+        return None
+    if user is not None and role_of(user.id) != REGULAR:
+        return None
+    return STORIES_FOR_PREMIUM_TEXT
 
 
 def daily_limit_of(user_id: int) -> Optional[int]:

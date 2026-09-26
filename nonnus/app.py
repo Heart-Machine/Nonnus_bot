@@ -97,10 +97,10 @@ async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
 # so it lives in the repository with everything else. It is set on every
 # start, which also means an edit made in BotFather lasts until the next one.
 # The command menus are in menu.py.
-BOT_SHORT_DESCRIPTION = "Пришли ссылку на рилс, фото или карусель из Instagram - пришлю их сюда."
+BOT_SHORT_DESCRIPTION = "Пришли ссылку на рилс, фото, карусель, сторис или хайлайт из Instagram - пришлю их сюда."
 
 BOT_DESCRIPTION = (
-    "Скачиваю публикации из Instagram: рилсы, посты с фото и карусели. "
+    "Скачиваю из Instagram рилсы, посты с фото, карусели, сторис и хайлайты. "
     "Карусель приходит одним сообщением, которое можно листать.\n\n"
     "Как пользоваться:\n"
     "• пришли мне ссылку в личку;\n"

@@ -128,8 +128,22 @@ def build_input_media(kind: str, media: Any, caption: Optional[str]) -> InputMed
 
 
 # Telegram's limit on media in a single rich message. An Instagram carousel
-# tops out at 20, so this only matters if that ever changes.
+# tops out at 20; a highlight can hold a hundred - one tried held 95 - and goes
+# out as several slideshows (see slideshow_messages).
 RICH_MESSAGE_MEDIA_LIMIT = 50
+
+
+def caption_label(url: str, caption: str) -> str:
+    """What the post is called in its caption - "Пост", "Сторис",
+    "Хайлайт «Rare»" - the words before the author link. Without an author
+    there is no link to find them by, and the link tells."""
+    match = re.match(r"([^<\n]+?)\s*<a ", caption or "")
+    if match:
+        return unescape(match.group(1))
+    kind = links.story_kind(url)
+    if kind == links.HIGHLIGHT:
+        return "Хайлайт"
+    return "Сторис" if kind else "Пост"
 
 
 def carousel_slideshow_message(url: str, cached_result: dict[str, Any]) -> Optional[dict[str, Any]]:
@@ -158,12 +172,12 @@ def carousel_slideshow_message(url: str, cached_result: dict[str, Any]) -> Optio
     post_url = links.normalize_post_url(url)
     author = cached_result.get("title")
     link_text = author if author and author != "Instagram" else post_url
+    label = caption_label(url, cached_result.get("caption") or "")
     blocks: list[dict[str, Any]] = [
         {
             "type": "slideshow",
             "blocks": slides,
-            # A slideshow is always a carousel, so always a post.
-            "caption": {"text": ["Пост ", {"type": "url", "text": link_text, "url": post_url}]},
+            "caption": {"text": [f"{label} ", {"type": "url", "text": link_text, "url": post_url}]},
         }
     ]
 
@@ -174,6 +188,34 @@ def carousel_slideshow_message(url: str, cached_result: dict[str, Any]) -> Optio
         blocks.append({"type": "paragraph", "text": unescape(note)})
 
     return {"blocks": blocks}
+
+
+def slideshow_messages(url: str, cached_result: dict[str, Any]) -> Optional[list[tuple[list[dict[str, str]], dict[str, Any]]]]:
+    """The post as slideshows of at most RICH_MESSAGE_MEDIA_LIMIT files each,
+    as even as they come, with the files each one holds; None when it cannot
+    be slideshows at all. A carousel is always one; a highlight of 95 is two,
+    48 and 47, rather than ten albums. Each names the post; the notes after
+    the author link go with the first."""
+    items = cached_result.get("items") or []
+    count = -(-len(items) // RICH_MESSAGE_MEDIA_LIMIT)
+    if count <= 1:
+        slideshow = carousel_slideshow_message(url, cached_result)
+        return [(items, slideshow)] if slideshow else None
+
+    size, larger = divmod(len(items), count)
+    head = (cached_result.get("caption") or "").split("\n\n", 1)[0]
+    messages, start = [], 0
+    for number in range(count):
+        end = start + size + (1 if number < larger else 0)
+        part = {**cached_result, "items": items[start:end]}
+        if number:
+            part["caption"] = head
+        slideshow = carousel_slideshow_message(url, part)
+        if slideshow is None:
+            return None
+        messages.append((items[start:end], slideshow))
+        start = end
+    return messages
 
 
 async def get_bot_username(context: ContextTypes.DEFAULT_TYPE) -> str:
@@ -331,15 +373,23 @@ async def send_prepared_result(message, cached_result: dict[str, Any], url: str)
     if not items:
         raise RuntimeError("Prepared result has no media")
 
-    slideshow = carousel_slideshow_message(url, cached_result) if len(items) > 1 else None
-    if slideshow is not None:
+    caption = cached_result.get("caption", "")
+    slideshows = slideshow_messages(url, cached_result) if len(items) > 1 else None
+    if slideshows is None:
+        await send_albums(message, items, caption)
+        return
+
+    for number, (part, slideshow) in enumerate(slideshows):
         try:
             await send_rich_message(message, slideshow)
-            return
         except BadRequest:
             logger.exception("Telegram refused the carousel slideshow for %s, sending albums instead", url)
+            await send_albums(message, part, caption if number == 0 else None)
 
-    caption = cached_result.get("caption", "")
+
+async def send_albums(message, items: list[dict[str, str]], caption: Optional[str]) -> None:
+    """Files already uploaded, as albums and single files (see album_groups),
+    the caption on the first."""
     for chunk_index, chunk in enumerate(album_groups(items, lambda item: item.get("type", "video"))):
         chunk_caption = caption if chunk_index == 0 else None
         if len(chunk) == 1:
