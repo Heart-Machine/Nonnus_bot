@@ -18,64 +18,18 @@ from nonnus import config, links, media, instagram, cache, delivery, preparation
 logger = logging.getLogger(__name__)
 
 
-INCOMPLETE_POST_TEXT = (
-    "Не получилось скачать публикацию целиком: часть файлов не загрузилась. "
-    "Попробуй ещё раз чуть позже."
-)
-
-
 SEND_FAILED_TEXT = (
     "Не получилось отправить публикацию в этот чат. Если она не пришла, пришли ссылку ещё раз."
-)
-
-
-UPLOAD_FAILED_TEXT = (
-    "Публикация скачалась, но загрузить её в Telegram не получилось. Попробуй ещё раз чуть позже."
 )
 
 
 UNEXPECTED_ERROR_TEXT = "Что-то пошло не так. Попробуй ещё раз чуть позже."
 
 
-def no_media_text(url: str) -> str:
-    """What to say when Instagram gave nothing to download. For a story that
-    mostly means it is gone: they last a day."""
-    kind = links.story_kind(url)
-    if kind == links.STORY:
-        return "Этой сторис больше нет: сторис живут сутки."
-    if kind == links.STORIES:
-        return "Сейчас у этого пользователя нет сторис."
-    if kind == links.HIGHLIGHT:
-        return "В этом хайлайте нет ни видео, ни фото, которые я могу скачать."
-    return "В этой публикации нет ни видео, ни фото, которые я могу скачать."
-
-
-def download_failed_text(url: str) -> str:
-    kind = links.story_kind(url)
-    if kind == links.STORY:
-        return "Не получилось скачать сторис. Возможно, она уже исчезла - сторис живут сутки - или аккаунт закрытый."
-    if kind == links.STORIES:
-        return "Не получилось скачать сторис. Возможно, сейчас их нет или аккаунт закрытый."
-    if kind == links.HIGHLIGHT:
-        return "Не получилось скачать хайлайт. Возможно, его удалили или аккаунт закрытый."
-    return (
-        "Не получилось скачать публикацию. Возможно, она закрытая или удалена. "
-        "Если ссылка открывается в Instagram, попробуй ещё раз чуть позже."
-    )
-
-
 SHARE_LINK_UNRESOLVED_TEXT = (
     "Не получилось понять, на какой пост ведёт эта ссылка: Instagram не ответил. "
     "Пришли обычную ссылку на пост - в Instagram это «Копировать ссылку»."
 )
-
-
-def too_large_text(error: media.MediaTooLargeError) -> str:
-    """Name the limit that was actually crossed: a photo's is five times
-    lower than a video's, and "larger than 50 MB" about a 12 MB photo would be
-    plainly wrong."""
-    what = "видео" if error.kind == "video" else "фото"
-    return f"Публикация скачалась, но {what} в ней больше {error.limit_mb} МБ, а Telegram такие не принимает."
 
 
 async def is_message_addressed_to_bot(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
@@ -220,15 +174,15 @@ async def _deliver_post(message, url: str, context: ContextTypes.DEFAULT_TYPE, s
             cached_result = await task
         except instagram.NoMediaInPostError:
             logger.info("No downloadable media in post %s", url)
-            await status.fail(no_media_text(url))
+            await status.fail(status_message.no_media_text(url))
             return
         except instagram.IncompletePostError as error:
             logger.warning("Could not fetch all of %s: %s", url, preparation.describe_failure(error))
-            await status.fail(INCOMPLETE_POST_TEXT)
+            await status.fail(status_message.INCOMPLETE_POST_TEXT)
             return
         except media.MediaTooLargeError as error:
             logger.warning("Media too large for %s: %s", url, preparation.describe_failure(error))
-            await status.fail(too_large_text(error))
+            await status.fail(status_message.too_large_text(error))
             return
         except TelegramError as error:
             # The one thing in the preparation that talks to Telegram is the
@@ -236,11 +190,11 @@ async def _deliver_post(message, url: str, context: ContextTypes.DEFAULT_TYPE, s
             # Blaming it - private, deleted - would send the user looking in
             # the wrong place; the storage chat is what to check.
             logger.warning("Failed to upload %s to the storage chat: %s", url, preparation.describe_failure(error))
-            await status.fail(UPLOAD_FAILED_TEXT)
+            await status.fail(status_message.UPLOAD_FAILED_TEXT)
             return
         except Exception as error:
             logger.warning("Failed to prepare %s: %s", url, preparation.describe_failure(error))
-            await status.fail(download_failed_text(url))
+            await status.fail(status_message.download_failed_text(url))
             return
 
         try:
@@ -274,17 +228,17 @@ async def _deliver_post(message, url: str, context: ContextTypes.DEFAULT_TYPE, s
         except instagram.NoMediaInPostError:
             users.give_back_download(download)
             logger.info("No downloadable media in post %s", url)
-            await status.fail(no_media_text(url))
+            await status.fail(status_message.no_media_text(url))
             return
         except instagram.IncompletePostError:
             users.give_back_download(download)
             logger.exception("Could not fetch all of %s", url)
-            await status.fail(INCOMPLETE_POST_TEXT)
+            await status.fail(status_message.INCOMPLETE_POST_TEXT)
             return
         except Exception:
             users.give_back_download(download)
             logger.exception("Failed to download %s", url)
-            await status.fail(download_failed_text(url))
+            await status.fail(status_message.download_failed_text(url))
             return
 
         items, compressed = await preparation.prepare_items_in_thread(items, temp_dir)
@@ -293,7 +247,7 @@ async def _deliver_post(message, url: str, context: ContextTypes.DEFAULT_TYPE, s
         try:
             media.ensure_items_fit_telegram(items)
         except media.MediaTooLargeError as error:
-            await status.fail(too_large_text(error))
+            await status.fail(status_message.too_large_text(error))
             return
 
         tracker.report(progress.UPLOADING)

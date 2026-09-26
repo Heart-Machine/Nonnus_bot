@@ -382,32 +382,22 @@ async def handle_inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE
     if task.done():
         try:
             cached_result = task.result()
-        except instagram.NoMediaInPostError:
-            logger.info("No downloadable media in post %s", url)
-            await inline_query.answer(
-                [
-                    build_inline_article(
-                        inline_result_id(url),
-                        "В посте нет медиа",
-                        "Не нашлось ни видео, ни фото",
-                        "В этой публикации нет ни видео, ни фото, которые я могу скачать.",
-                    )
-                ],
-                cache_time=0,
-                is_personal=True,
-            )
-            return
         except Exception as error:
             # The traceback is in the log once already, from the preparation;
-            # this runs again on every keystroke of the query.
+            # this runs again on every keystroke of the query. What the result
+            # says is what a link sent to the bot would have been told.
             logger.info("Answering the inline query for %s with its failed preparation: %s", url, preparation.describe_failure(error))
+            if isinstance(error, instagram.NoMediaInPostError):
+                title, description = "Нечего скачать", "Не нашлось ни видео, ни фото"
+            else:
+                title, description = "Не получилось скачать", "Попробуй ещё раз или отправь ссылку боту в личку"
             await inline_query.answer(
                 [
                     build_inline_article(
                         inline_result_id(url),
-                        "Не получилось подготовить публикацию",
-                        "Попробуй еще раз или отправь ссылку боту в личку",
-                        "Не получилось подготовить файлы для inline-отправки.",
+                        title,
+                        description,
+                        status_message.failure_text(url, error),
                     )
                 ],
                 cache_time=0,
@@ -491,7 +481,7 @@ async def handle_chosen_inline_result(update: Update, context: ContextTypes.DEFA
         except Exception as error:
             logger.warning("Could not prepare %s for the chosen placeholder: %s", url, preparation.describe_failure(error))
             try:
-                await status.fail("Не получилось подготовить публикацию. Попробуй еще раз.")
+                await status.fail(status_message.failure_text(url, error))
             except TelegramError:
                 pass
             return

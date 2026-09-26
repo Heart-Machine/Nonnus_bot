@@ -16,7 +16,7 @@ from types import SimpleNamespace
 import pytest
 from telegram.error import BadRequest, NetworkError, TimedOut
 
-from nonnus import cache, config, delivery, handlers, inline, instagram, media, preparation
+from nonnus import cache, config, delivery, handlers, inline, instagram, media, preparation, status_message
 
 POST_URL = "https://www.instagram.com/p/ABC123/"
 DEAD_FILE_ID = BadRequest("Bad Request: wrong file identifier/HTTP URL specified")
@@ -274,7 +274,10 @@ def test_a_failed_preparation_answers_the_next_inline_queries_without_downloadin
     # next ones get the outcome - a branch that could never run before.
     assert answered_with(first) == [("photo", inline.inline_result_id(POST_URL))]
     assert answered_with(second)[0][0] == "article"
-    assert second.answers[-1][0].title == "В посте нет медиа"
+    # The words are the ones a link sent to the bot gets; the title used to
+    # be "В посте нет медиа", said of a story that had expired as well.
+    assert second.answers[-1][0].title == "Нечего скачать"
+    assert second.answers[-1][0].input_message_content.message_text == status_message.no_media_text(POST_URL)
     assert answered_with(third) == answered_with(second)
 
 
