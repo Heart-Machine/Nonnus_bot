@@ -123,17 +123,30 @@ UPLOAD_REQUEST_LIMIT_BYTES = 60 * 1024 * 1024
 ALBUM_UPLOAD_BYTES = UPLOAD_REQUEST_LIMIT_BYTES - 1024 * 1024
 
 
+def album_upload_bytes() -> Optional[int]:
+    """How much of an album's files one request may carry: ALBUM_UPLOAD_BYTES
+    on the cloud Bot API, no limit on a server of the bot's own. That one
+    writes an upload to its temporary files rather than hold it in memory
+    and takes up to 50 files in a request (MAX_IN_MEMORY_POST_SIZE = 0 and
+    MAX_FILE_COUNT = 50 in its source); files of up to 2000 MB each."""
+    return None if config.TELEGRAM_API_URL else ALBUM_UPLOAD_BYTES
+
+
 def upload_groups(items: list[media.MediaItem]) -> list[list[media.MediaItem]]:
     """album_groups for files uploaded from disk: an album whose files add up
     to more than one request can carry is split further, in order. A part of
     one file goes out as a message of its own, as a lone file does anyway."""
+    limit = album_upload_bytes()
+    if limit is None:
+        return album_groups(items, lambda item: item.kind)
+
     groups: list[list[media.MediaItem]] = []
     for chunk in album_groups(items, lambda item: item.kind):
         group: list[media.MediaItem] = []
         group_bytes = 0
         for item in chunk:
             size = item.path.stat().st_size
-            if group and group_bytes + size > ALBUM_UPLOAD_BYTES:
+            if group and group_bytes + size > limit:
                 groups.append(group)
                 group, group_bytes = [], 0
             group.append(item)

@@ -22,6 +22,9 @@ os.environ["ENABLE_VIDEO_COMPRESSION"] = "true"
 os.environ["ADMIN_USER_IDS"] = ""
 os.environ["DAILY_DOWNLOAD_LIMIT"] = "5"
 os.environ["DAILY_LIMIT_TIMEZONE"] = "Europe/Moscow"
+# The cloud Bot API, whatever a developer's .env says: a test that means a
+# server of the bot's own sets it itself.
+os.environ["TELEGRAM_API_URL"] = ""
 
 
 @pytest.fixture(autouse=True)
@@ -46,6 +49,15 @@ def account_ids(monkeypatch, tmp_path):
     fresh = cache.AccountIds(tmp_path / "inline_cache.sqlite3")
     monkeypatch.setattr(cache, "ACCOUNT_IDS", fresh)
     return fresh
+
+
+@pytest.fixture(autouse=True)
+def cloud_logout_marker(monkeypatch, tmp_path):
+    """The note that the bot left the cloud Bot API, in the test's own
+    directory rather than next to the project's databases."""
+    from nonnus import config
+
+    monkeypatch.setattr(config, "CLOUD_LOGOUT_MARKER", tmp_path / "cloud-bot-api-logged-out")
 
 
 @pytest.fixture(autouse=True)
