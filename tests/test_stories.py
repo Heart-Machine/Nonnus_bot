@@ -7,12 +7,15 @@ runs is yt-dlp's story extractor with the bot's changes to it. The accounts
 and ids are made up.
 """
 import asyncio
+from contextlib import closing
 from pathlib import Path
+import sqlite3
 from types import SimpleNamespace
 
 import pytest
 
 from telegram.error import BadRequest
+from yt_dlp.utils import ExtractorError
 
 from nonnus import cache, config, delivery, handlers, inline, instagram, links, media, preparation, progress, status_message, users
 
@@ -95,38 +98,71 @@ def story_item(pk, video):
     return item
 
 
+class InstagramAnswers:
+    """What the stand-in Instagram answers, and what it was asked, in order.
+
+    Account 42 is some.one, with a video and a photo in their stories and in
+    a highlight. Account 99 is someone.else, with a story of their own."""
+
+    def __init__(self):
+        self.asked = []
+        self.search = "finds"  # or "misses", or "fails"
+        self.page = "finds"  # or "misses"
+        self.stories_of_42 = True
+
+    def paths(self):
+        return [url.removeprefix("https://www.instagram.com/").removeprefix("api/v1/") for url in self.asked]
+
+    def json(self, url):
+        self.asked.append(url)
+        items = [story_item(STORY_PK, video=True), story_item(PHOTO_PK, video=False)]
+        if "/media/" in url:
+            pk = url.split("/media/")[1].split("/")[0]
+            return {"items": [item for item in items if item["pk"] == pk]}
+        if "web_profile_info" in url:
+            raise AssertionError("web_profile_info was asked for: Instagram answers the server 429 there")
+        if "topsearch" in url:
+            if self.search == "fails":
+                raise ExtractorError("Unable to download JSON metadata: HTTP Error 429: Too Many Requests")
+            # A near miss comes first: only the exact username counts.
+            users = [{"user": {"pk": "7", "username": "some.one.fan"}}]
+            if self.search == "finds":
+                users.append({"user": {"pk": "42", "username": "Some.One"}})
+            return {"users": users}
+        reels = {
+            f"highlight:{HIGHLIGHT_ID}": {"title": "Trip", "user": dict(USER), "items": items},
+            "99": {"user": {"pk": "99", "username": "someone.else"},
+                   "items": [{**story_item("99000", video=True), "user": {"pk": "99", "username": "someone.else"}}]},
+        }
+        if self.stories_of_42:
+            reels["42"] = {"user": dict(USER), "items": [dict(item) for item in items]}
+        reel_id = url.split("reel_ids=")[1]
+        return {"reels": {reel_id: reels[reel_id]} if reel_id in reels else {}}
+
+    def webpage(self, url):
+        if url != "https://www.instagram.com/some.one/":
+            raise AssertionError(f"a web page other than the profile was asked for: {url}")
+        self.asked.append(url)
+        if self.page == "finds":
+            return '<script>{"page_id":"profilePage_42","profile_id":"42"}</script>'
+        return "<html>Log in</html>"
+
+
 @pytest.fixture
 def instagram_answers(monkeypatch):
-    """Instagram's API, answering the bot's story extractor with a video and a
-    photo: one story by its id, a user's id by username, and reels_media for
-    a highlight and for the user's current stories.
+    """Instagram, answering the bot's story extractor: one story by its id,
+    reels_media for a highlight and for someone's current stories, the
+    search and the profile page for an account's id.
 
     The story's web page is not to be asked for at all: logged in, Instagram
     sends it to the home page. Replaced on yt-dlp's own extractor, which the
     bot's inherits from, so a story sent to yt-dlp's extractor by mistake
     would still stay off the network - and ask for the page, which fails the
     test."""
-    asked = []
-
-    def download_webpage(self, url, video_id, *args, **kwargs):
-        raise AssertionError(f"the story's web page was asked for: {url}")
-
-    def download_json(self, url, video_id, *args, **kwargs):
-        asked.append(url)
-        items = [story_item(STORY_PK, video=True), story_item(PHOTO_PK, video=False)]
-        if "/media/" in url:
-            pk = url.split("/media/")[1].split("/")[0]
-            return {"items": [item for item in items if item["pk"] == pk]}
-        if "web_profile_info" in url:
-            return {"data": {"user": {"id": "42", "username": "some.one"}}}
-        return {"reels": {
-            f"highlight:{HIGHLIGHT_ID}": {"title": "Trip", "user": dict(USER), "items": items},
-            "42": {"user": dict(USER), "items": [dict(item) for item in items]},
-        }}
-
-    monkeypatch.setattr(instagram.InstagramStoryIE, "_download_webpage", download_webpage)
-    monkeypatch.setattr(instagram.InstagramStoryIE, "_download_json", download_json)
-    return asked
+    answers = InstagramAnswers()
+    monkeypatch.setattr(instagram.InstagramStoryIE, "_download_webpage", lambda self, url, *a, **k: answers.webpage(url))
+    monkeypatch.setattr(instagram.InstagramStoryIE, "_download_json", lambda self, url, *a, **k: answers.json(url))
+    return answers
 
 
 def test_a_highlight_keeps_its_photos(instagram_answers, tmp_path):
@@ -149,7 +185,7 @@ def test_a_story_link_brings_that_one_story(instagram_answers, tmp_path):
     assert info["formats"] == []
     assert instagram.best_photo_url(info) == f"https://cdn.example/{PHOTO_PK}.jpg"
     assert info["channel"] == "some.one"
-    assert [url.split("/api/v1/")[1] for url in instagram_answers] == [f"media/{PHOTO_PK}/info/"]
+    assert instagram_answers.paths() == [f"media/{PHOTO_PK}/info/"]
 
 
 def test_a_story_that_is_gone_is_said_to_be(monkeypatch, tmp_path):
@@ -162,26 +198,146 @@ def test_a_story_that_is_gone_is_said_to_be(monkeypatch, tmp_path):
 def test_a_highlight_takes_one_request(instagram_answers, tmp_path):
     instagram.probe_post(f"https://www.instagram.com/stories/highlights/{HIGHLIGHT_ID}/", tmp_path, use_cookies=False)
 
-    assert [url.split("/api/v1/")[1] for url in instagram_answers] == [
-        f"feed/reels_media/?reel_ids=highlight:{HIGHLIGHT_ID}"
-    ]
+    assert instagram_answers.paths() == [f"feed/reels_media/?reel_ids=highlight:{HIGHLIGHT_ID}"]
+
+
+SOME_ONE_S_STORIES = "https://www.instagram.com/stories/some.one/"
 
 
 def test_a_user_s_stories_are_all_of_them(instagram_answers, tmp_path):
-    info = instagram.probe_post("https://www.instagram.com/stories/some.one/", tmp_path, use_cookies=False)
+    info = instagram.probe_post(SOME_ONE_S_STORIES, tmp_path, use_cookies=False)
+
+    assert [entry["channel"] for entry in instagram.post_entries(info)] == ["some.one", "some.one"]
+    # The id by Instagram's search, not by web_profile_info, which Instagram
+    # answers the server 429.
+    assert instagram_answers.paths() == ["web/search/topsearch/?query=some.one", "feed/reels_media/?reel_ids=42"]
+    assert cache.known_account_id("some.one") == "42"
+
+
+def test_an_account_id_once_found_is_not_looked_up_again(instagram_answers, tmp_path):
+    instagram.probe_post(SOME_ONE_S_STORIES, tmp_path, use_cookies=False)
+    instagram_answers.asked.clear()
+
+    info = instagram.probe_post(SOME_ONE_S_STORIES, tmp_path, use_cookies=False)
 
     assert len(instagram.post_entries(info)) == 2
-    assert [url.split("/api/v1/")[1] for url in instagram_answers] == [
-        "users/web_profile_info/?username=some.one",
+    assert instagram_answers.paths() == ["feed/reels_media/?reel_ids=42"]
+
+
+@pytest.mark.parametrize("search", ["misses", "fails"])
+def test_an_account_the_search_does_not_give_is_found_on_its_profile_page(instagram_answers, tmp_path, search):
+    instagram_answers.search = search
+
+    info = instagram.probe_post(SOME_ONE_S_STORIES, tmp_path, use_cookies=False)
+
+    assert len(instagram.post_entries(info)) == 2
+    assert instagram_answers.paths() == [
+        "web/search/topsearch/?query=some.one",
+        "some.one/",
         "feed/reels_media/?reel_ids=42",
     ]
 
 
-def test_someone_instagram_gives_no_id_for_is_not_guessed(monkeypatch, tmp_path):
-    monkeypatch.setattr(instagram.InstagramStoryIE, "_download_json", lambda self, url, video_id, *a, **k: {"data": {}})
+def test_someone_instagram_gives_no_id_for_is_not_guessed(instagram_answers, tmp_path):
+    instagram_answers.search = "misses"
+    instagram_answers.page = "misses"
 
     with pytest.raises(instagram.YoutubeDLError, match="no id for some.one"):
-        instagram.probe_post("https://www.instagram.com/stories/some.one/", tmp_path, use_cookies=False)
+        instagram.probe_post(SOME_ONE_S_STORIES, tmp_path, use_cookies=False)
+
+    assert instagram_answers.paths() == ["web/search/topsearch/?query=some.one", "some.one/"]
+    assert cache.known_account_id("some.one") is None
+
+
+def test_a_username_that_passed_to_someone_else_is_looked_up_again(instagram_answers, tmp_path):
+    # The id kept for some.one is 99's - whose stories now come back under
+    # another name.
+    cache.remember_account_id("some.one", "99")
+
+    info = instagram.probe_post(SOME_ONE_S_STORIES, tmp_path, use_cookies=False)
+
+    assert [entry["channel"] for entry in instagram.post_entries(info)] == ["some.one", "some.one"]
+    assert instagram_answers.paths() == [
+        "feed/reels_media/?reel_ids=99",
+        "web/search/topsearch/?query=some.one",
+        "feed/reels_media/?reel_ids=42",
+    ]
+    assert cache.known_account_id("some.one") == "42"
+
+
+def test_a_kept_id_with_no_stories_behind_it_stands(instagram_answers, tmp_path):
+    # With no stories there is no name to tell a passed username by, and
+    # looking the id up every time someone has no stories would cost the
+    # request the kept id is there to save.
+    cache.remember_account_id("some.one", "42")
+    instagram_answers.stories_of_42 = False
+
+    info = instagram.probe_post(SOME_ONE_S_STORIES, tmp_path, use_cookies=False)
+
+    assert instagram.post_entries(info) == []
+    assert instagram_answers.paths() == ["feed/reels_media/?reel_ids=42"]
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        f"https://www.instagram.com/stories/some.one/{STORY_PK}/",
+        f"https://www.instagram.com/stories/highlights/{HIGHLIGHT_ID}/",
+    ],
+)
+def test_a_story_or_a_highlight_teaches_the_bot_its_owner_s_id(instagram_answers, tmp_path, url):
+    instagram.probe_post(url, tmp_path, use_cookies=False)
+    instagram_answers.asked.clear()
+
+    instagram.probe_post(SOME_ONE_S_STORIES, tmp_path, use_cookies=False)
+
+    assert instagram_answers.paths() == ["feed/reels_media/?reel_ids=42"]
+
+
+def test_a_broken_id_store_does_not_stop_the_stories(monkeypatch, instagram_answers, tmp_path):
+    class Broken:
+        def get(self, username, *user_id):
+            raise sqlite3.OperationalError("disk I/O error")
+
+        put = get
+
+    monkeypatch.setattr(cache, "ACCOUNT_IDS", Broken())
+
+    info = instagram.probe_post(SOME_ONE_S_STORIES, tmp_path, use_cookies=False)
+
+    assert len(instagram.post_entries(info)) == 2
+
+
+def test_account_ids_are_kept_by_username_in_any_case(tmp_path):
+    ids = cache.AccountIds(tmp_path / "ids.sqlite3")
+
+    ids.put("Some.One", "42")
+    assert ids.get("some.one") == "42"
+
+    ids.put("some.one", "43")
+    assert ids.get("SOME.ONE") == "43"
+    assert ids.get("someone.else") is None
+
+
+def test_account_ids_keep_their_database_in_wal_mode(tmp_path):
+    # As the posts do, so that a hand edit of the file does not hold a lookup
+    # up - also when the ids are the first to open it.
+    cache.AccountIds(tmp_path / "ids.sqlite3").put("some.one", "42")
+
+    with closing(sqlite3.connect(tmp_path / "ids.sqlite3")) as connection:
+        assert connection.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
+
+
+def test_account_ids_share_the_cache_database_with_the_posts(post_cache, tmp_path):
+    # Both in one file, as on the server: the posts' connection stays open
+    # on the event loop while the ids are read and written from a thread.
+    post_cache.put("https://www.instagram.com/p/ABC/", cache.INLINE_CACHE_VERSION, {"items": []})
+    ids = cache.AccountIds(post_cache.path)
+
+    ids.put("some.one", "42")
+
+    assert ids.get("some.one") == "42"
+    assert post_cache.get("https://www.instagram.com/p/ABC/", cache.INLINE_CACHE_VERSION) == {"items": []}
 
 
 def test_posts_still_go_to_yt_dlp_s_own_extractor(monkeypatch, tmp_path):

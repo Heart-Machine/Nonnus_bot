@@ -38,6 +38,17 @@ def post_cache(monkeypatch, tmp_path):
 
 
 @pytest.fixture(autouse=True)
+def account_ids(monkeypatch, tmp_path):
+    """The Instagram account ids kept by username, in the test's own cache
+    database: an id one test learns is not known to the next."""
+    from nonnus import cache
+
+    fresh = cache.AccountIds(tmp_path / "inline_cache.sqlite3")
+    monkeypatch.setattr(cache, "ACCOUNT_IDS", fresh)
+    return fresh
+
+
+@pytest.fixture(autouse=True)
 def user_store(monkeypatch, tmp_path):
     """A users database of its own for every test, for the same reasons."""
     from nonnus import users

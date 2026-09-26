@@ -1,5 +1,7 @@
-"""The file_id cache of posts already uploaded to the storage chat."""
+"""The file_id cache of posts already uploaded to the storage chat, and the
+Instagram account ids of usernames, kept in the same database."""
 
+from contextlib import closing
 import logging
 import json
 import sqlite3
@@ -181,3 +183,73 @@ def forget_cached_inline_result(url: str) -> None:
         POST_CACHE.delete(links.normalize_post_url(url))
     except (sqlite3.Error, OSError):
         logger.exception("Failed to drop %s from the post cache", url)
+
+
+class AccountIds:
+    """Instagram account ids by username. Someone's current stories are asked
+    for by their account id, and the link names the username.
+
+    Finding an id is the request Instagram is least willing to answer, so an
+    id found is kept for good - an account keeps its id for life - and the
+    same account's stories cost no lookup next time. A username can pass to
+    another account, though: the story extractor notices when stories come
+    back under another name and looks the id up again.
+
+    A table of its own in the cache's database file: it is a cache too, and
+    losing it costs lookups, nothing more. It is used from the download
+    threads, so every call opens a connection of its own rather than share
+    the event loop's."""
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+
+    def get(self, username: str) -> Optional[str]:
+        with closing(self._connect()) as connection:
+            row = connection.execute(
+                "SELECT user_id FROM instagram_accounts WHERE username = ?", (username.lower(),)
+            ).fetchone()
+        return row[0] if row else None
+
+    def put(self, username: str, user_id: str) -> None:
+        with closing(self._connect()) as connection:
+            connection.execute(
+                "INSERT INTO instagram_accounts (username, user_id) VALUES (?, ?)"
+                " ON CONFLICT (username) DO UPDATE SET user_id = excluded.user_id, saved_at = CURRENT_TIMESTAMP",
+                (username.lower(), str(user_id)),
+            )
+
+    def _connect(self) -> sqlite3.Connection:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        connection = sqlite3.connect(self.path, timeout=5, isolation_level=None)
+        try:
+            connection.execute("PRAGMA journal_mode = WAL")
+            connection.execute(
+                "CREATE TABLE IF NOT EXISTS instagram_accounts ("
+                " username TEXT PRIMARY KEY,"
+                " user_id TEXT NOT NULL,"
+                " saved_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)"
+            )
+        except BaseException:
+            connection.close()
+            raise
+        return connection
+
+
+ACCOUNT_IDS = AccountIds(config.INLINE_CACHE_DB)
+
+
+def known_account_id(username: str) -> Optional[str]:
+    """The id kept for this username, or None - also when the database cannot
+    be read: the id is then looked up, as for an account never seen."""
+    try:
+        return ACCOUNT_IDS.get(username)
+    except (sqlite3.Error, OSError):
+        logger.exception("Failed to read the id of %s", username)
+        return None
+
+
+def remember_account_id(username: str, user_id: str) -> None:
+    try:
+        ACCOUNT_IDS.put(username, user_id)
+    except (sqlite3.Error, OSError):
+        logger.exception("Failed to keep the id of %s", username)
