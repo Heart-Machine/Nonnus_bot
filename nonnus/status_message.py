@@ -13,7 +13,7 @@ from typing import Any, Optional
 
 from telegram.error import TelegramError
 
-from nonnus import progress
+from nonnus import instagram, links, media, progress
 
 
 logger = logging.getLogger(__name__)
@@ -44,6 +44,71 @@ def progress_text(stage: str, done: int = 0, total: int = 0, kind: Optional[str]
     if total > 1:
         return f"Скачиваю {noun}: {done} из {total}..."
     return f"Скачиваю {noun}..."
+
+
+INCOMPLETE_POST_TEXT = (
+    "Не получилось скачать публикацию целиком: часть файлов не загрузилась. "
+    "Попробуй ещё раз чуть позже."
+)
+
+
+UPLOAD_FAILED_TEXT = (
+    "Публикация скачалась, но загрузить её в Telegram не получилось. Попробуй ещё раз чуть позже."
+)
+
+
+def no_media_text(url: str) -> str:
+    """What to say when Instagram gave nothing to download. For a story that
+    mostly means it is gone: they last a day."""
+    kind = links.story_kind(url)
+    if kind == links.STORY:
+        return "Этой сторис больше нет: сторис живут сутки."
+    if kind == links.STORIES:
+        return "Сейчас у этого пользователя нет сторис."
+    if kind == links.HIGHLIGHT:
+        return "В этом хайлайте нет ни видео, ни фото, которые я могу скачать."
+    return "В этой публикации нет ни видео, ни фото, которые я могу скачать."
+
+
+def download_failed_text(url: str) -> str:
+    kind = links.story_kind(url)
+    if kind == links.STORY:
+        return "Не получилось скачать сторис. Возможно, она уже исчезла - сторис живут сутки - или аккаунт закрытый."
+    if kind == links.STORIES:
+        return "Не получилось скачать сторис. Возможно, сейчас их нет или аккаунт закрытый."
+    if kind == links.HIGHLIGHT:
+        return "Не получилось скачать хайлайт. Возможно, его удалили или аккаунт закрытый."
+    return (
+        "Не получилось скачать публикацию. Возможно, она закрытая или удалена. "
+        "Если ссылка открывается в Instagram, попробуй ещё раз чуть позже."
+    )
+
+
+def too_large_text(error: media.MediaTooLargeError) -> str:
+    """Name the limit that was actually crossed: a photo's is five times
+    lower than a video's, and "larger than 50 MB" about a 12 MB photo would be
+    plainly wrong."""
+    what = "видео" if error.kind == "video" else "фото"
+    return f"Публикация скачалась, но {what} в ней больше {error.limit_mb} МБ, а Telegram такие не принимает."
+
+
+def failure_text(url: str, error: BaseException) -> str:
+    """What a status ends with when getting `url` ready failed with `error`:
+    the same words under a link sent to the bot and on an inline placeholder.
+
+    The one thing in a preparation that talks to Telegram is the upload to the
+    storage chat, so a TelegramError means the post itself came through -
+    blaming it, private or deleted, would send the user looking in the wrong
+    place."""
+    if isinstance(error, instagram.NoMediaInPostError):
+        return no_media_text(url)
+    if isinstance(error, instagram.IncompletePostError):
+        return INCOMPLETE_POST_TEXT
+    if isinstance(error, media.MediaTooLargeError):
+        return too_large_text(error)
+    if isinstance(error, TelegramError):
+        return UPLOAD_FAILED_TEXT
+    return download_failed_text(url)
 
 
 # The least time between two edits of a status message. Telegram limits how

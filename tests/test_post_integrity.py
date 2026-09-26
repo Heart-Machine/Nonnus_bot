@@ -18,7 +18,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from nonnus import cache, config, delivery, handlers, instagram, media
+from nonnus import cache, config, delivery, handlers, instagram, media, status_message
 
 POST_URL = "https://www.instagram.com/p/ABC123/"
 
@@ -123,7 +123,7 @@ def test_an_incomplete_post_is_not_cached_and_the_user_is_told(monkeypatch):
 
     asyncio.run(run())
 
-    assert status.text == handlers.INCOMPLETE_POST_TEXT
+    assert status.text == status_message.INCOMPLETE_POST_TEXT
     assert cache.get_cached_inline_result(POST_URL) is None
 
 

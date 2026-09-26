@@ -8,9 +8,9 @@ import asyncio
 from types import SimpleNamespace
 
 import pytest
-from telegram.error import Forbidden
+from telegram.error import BadRequest, Forbidden
 
-from nonnus import config, delivery, handlers, instagram, media
+from nonnus import config, delivery, handlers, instagram, media, status_message
 
 POST_URL = "https://www.instagram.com/p/ABC123/"
 MB = 1024 * 1024
@@ -89,7 +89,7 @@ def test_the_error_carries_the_kind_and_the_limit_it_crossed(tmp_path, monkeypat
     [("photo", 10, ["фото", "10 МБ"]), ("video", 50, ["видео", "50 МБ"])],
 )
 def test_the_message_names_the_limit_that_was_crossed(kind, limit_mb, words):
-    text = handlers.too_large_text(media.MediaTooLargeError(kind, limit_mb))
+    text = status_message.too_large_text(media.MediaTooLargeError(kind, limit_mb))
 
     assert all(word in text for word in words)
 
@@ -131,7 +131,7 @@ def test_a_failed_storage_upload_is_not_blamed_on_the_post(monkeypatch, tmp_path
     monkeypatch.setattr(instagram, "download_post", download_post)
     monkeypatch.setattr(delivery, "upload_items_to_storage", upload_items_to_storage)
 
-    assert send_link() == handlers.UPLOAD_FAILED_TEXT
+    assert send_link() == status_message.UPLOAD_FAILED_TEXT
 
 
 def test_a_download_that_failed_still_says_so(monkeypatch):
@@ -143,3 +143,30 @@ def test_a_download_that_failed_still_says_so(monkeypatch):
     monkeypatch.setattr(instagram, "download_post", download_post)
 
     assert "закрытая или удалена" in send_link()
+
+
+# --- one set of words, wherever the post was asked for ------------------------
+
+
+STORY_URL = "https://www.instagram.com/stories/some.one/3994224585897789830/"
+
+
+@pytest.mark.parametrize(
+    "error, expected",
+    [
+        (instagram.NoMediaInPostError("nothing"), status_message.no_media_text(POST_URL)),
+        (instagram.IncompletePostError("2 of 3"), status_message.INCOMPLETE_POST_TEXT),
+        (media.MediaTooLargeError("photo", 10), status_message.too_large_text(media.MediaTooLargeError("photo", 10))),
+        (BadRequest("chat not found"), status_message.UPLOAD_FAILED_TEXT),
+        (RuntimeError("private"), status_message.download_failed_text(POST_URL)),
+    ],
+)
+def test_each_failure_has_its_own_words(error, expected):
+    assert status_message.failure_text(POST_URL, error) == expected
+
+
+def test_a_story_s_failure_is_said_of_a_story():
+    assert "сторис живут сутки" in status_message.failure_text(STORY_URL, RuntimeError("unreachable"))
+    assert status_message.failure_text(STORY_URL, instagram.NoMediaInPostError("gone")) == (
+        "Этой сторис больше нет: сторис живут сутки."
+    )

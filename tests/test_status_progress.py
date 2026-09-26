@@ -513,7 +513,10 @@ def test_a_failed_preparation_shows_on_the_placeholder(monkeypatch, slow_carouse
 
     bot = choose_the_placeholder(monkeypatch)
 
-    assert bot.captions()[-1] == "Не получилось подготовить публикацию. Попробуй еще раз."
+    # What a link sent to the bot would be told. It used to be a general
+    # "Не получилось подготовить публикацию" whatever had gone wrong - for an
+    # expired story, a closed account and a full storage chat alike.
+    assert bot.captions()[-1] == status_message.download_failed_text(POST_URL)
     assert bot.calls[-1][1]["reply_markup"].inline_keyboard[0][0].text == "Открыть в Instagram"
     assert [call for call, kwargs in bot.calls if call == "media"] == []
 

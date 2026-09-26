@@ -342,9 +342,9 @@ def test_nothing_to_download_is_explained_for_what_the_link_was(monkeypatch, url
 
 
 def test_a_failed_story_is_not_blamed_on_a_closed_post():
-    assert "сторис живут сутки" in handlers.download_failed_text(f"https://www.instagram.com/stories/some.one/{STORY_PK}/")
-    assert "хайлайт" in handlers.download_failed_text(f"https://www.instagram.com/stories/highlights/{HIGHLIGHT_ID}/")
-    assert "публикацию" in handlers.download_failed_text("https://www.instagram.com/p/ABC123/")
+    assert "сторис живут сутки" in status_message.download_failed_text(f"https://www.instagram.com/stories/some.one/{STORY_PK}/")
+    assert "хайлайт" in status_message.download_failed_text(f"https://www.instagram.com/stories/highlights/{HIGHLIGHT_ID}/")
+    assert "публикацию" in status_message.download_failed_text("https://www.instagram.com/p/ABC123/")
 
 
 # --- sending a highlight too big for one message --------------------------------------
@@ -560,3 +560,55 @@ def test_in_inline_mode_a_regular_user_is_told_too(monkeypatch):
     [[result]] = answers
     assert result.input_message_content.message_text == users.STORIES_FOR_PREMIUM_TEXT
     assert context.application.bot_data.get("inline_tasks", {}) == {}
+
+
+# --- inline says it the same way ---------------------------------------------------------
+
+
+def test_a_story_that_failed_on_a_placeholder_is_said_of_a_story(monkeypatch):
+    url = f"https://www.instagram.com/stories/some.one/{STORY_PK}/"
+
+    async def prepare_inline_post(url, context, tracker=None):
+        raise RuntimeError("This content is unreachable")
+
+    monkeypatch.setattr(preparation, "prepare_inline_post", prepare_inline_post)
+    captions = []
+
+    async def edit_message_caption(**kwargs):
+        captions.append(kwargs["caption"])
+
+    async def run():
+        loop = asyncio.get_running_loop()
+        context = SimpleNamespace(application=SimpleNamespace(bot_data={}, create_task=loop.create_task),
+                                  bot=SimpleNamespace(edit_message_caption=edit_message_caption))
+        chosen = SimpleNamespace(result_id=inline.inline_result_id(url), inline_message_id="inline-1", query=url,
+                                 from_user=SENDER)
+        await inline.handle_chosen_inline_result(SimpleNamespace(chosen_inline_result=chosen), context)
+
+    asyncio.run(run())
+
+    assert captions[-1] == status_message.download_failed_text(url)
+    assert "сторис живут сутки" in captions[-1]
+
+
+def test_an_inline_query_for_a_highlight_that_failed_moments_ago_is_told_why(monkeypatch):
+    monkeypatch.setattr(config, "STORAGE_CHAT_ID", "-100")
+    answers = []
+
+    async def answer(results, **kwargs):
+        answers.append(results)
+
+    async def run():
+        loop = asyncio.get_running_loop()
+        failed = loop.create_future()
+        failed.set_exception(RuntimeError("You need to log in"))
+        monkeypatch.setattr(preparation, "get_or_create_prepare_task",
+                            lambda url, context, reuse_failure=False, user=None: failed)
+        query = SimpleNamespace(query=HIGHLIGHT_URL, answer=answer, from_user=SENDER)
+        await inline.handle_inline_query(SimpleNamespace(inline_query=query), SimpleNamespace())
+
+    asyncio.run(run())
+
+    [[result]] = answers
+    assert result.title == "Не получилось скачать"
+    assert result.input_message_content.message_text == status_message.download_failed_text(HIGHLIGHT_URL)
