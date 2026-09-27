@@ -28,12 +28,8 @@ def failing_post(monkeypatch):
     async def placeholder(context, kind):
         return "placeholder"
 
-    async def no_alert(context):
-        pass
-
     monkeypatch.setattr(instagram, "download_post", download_post)
     monkeypatch.setattr(inline, "get_placeholder_photo_file_id", placeholder)
-    monkeypatch.setattr(preparation, "alert_if_cookies_rejected", no_alert)
 
 
 def new_context(loop):

@@ -7,8 +7,6 @@ import logging
 from html import escape
 import re
 import shutil
-import threading
-import time
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -177,108 +175,6 @@ def resolve_share_link(url: str) -> Optional[str]:
     return None
 
 
-# How long to go without the cookies once Instagram has turned them down,
-# before trying them again. The file only changes on a deploy, and a deploy
-# restarts the bot anyway, so this is for a session that recovers by itself -
-# rare, but cheap to allow for.
-COOKIE_RETRY_SECONDS = 60 * 60
-
-
-# How often, at most, to remind the owner that the cookies stopped working.
-COOKIE_ALERT_INTERVAL_SECONDS = 12 * 60 * 60
-
-
-# How many requests in a row Instagram has to turn the cookies down on before
-# they are set aside. One can be a timeout or a rate limit on the logged-in
-# route that happens to clear by the logged-out attempt right after; a dead
-# session fails every time, so it is caught by the second request anyway.
-COOKIE_REJECTIONS_TO_SUSPEND = 2
-
-
-COOKIE_ALERT_TEXT = (
-    "Instagram дважды подряд не принял cookies бота: публикации удалось скачать только без входа.\n\n"
-    "Пока бот скачивает без cookies. Публичные посты работают, а то, что требует входа, - нет.\n\n"
-    "Выгрузи свежие cookies аккаунта бота, обнови INSTAGRAM_COOKIES_B64 в окружении production "
-    "и запусти деплой вручную.\n\n"
-    "Следующее напоминание - не раньше чем через 12 ч."
-)
-
-
-class InstagramSession:
-    """Whether the Instagram cookies the bot was deployed with still work.
-
-    The cookie file is written once per deploy and the bot never updates it,
-    so a session Instagram has closed stays closed until the next deploy. And
-    a closed session is worse than none: yt-dlp sees sessionid, takes the
-    logged-in route and fails, where the logged-out route would have served a
-    public post without trouble.
-
-    Detection is indirect on purpose. A post that fails with the cookies and
-    then comes through without them says the cookies were the problem; one
-    that fails both ways says the post was - private or deleted - and raises no
-    alarm. That also keeps this off yt-dlp's error wording, which is nothing to
-    build on: a dead session currently surfaces as a JSON parse error rather
-    than as anything about logging in.
-
-    Being indirect, it cannot tell a dead session from a one-off failure on
-    the logged-in route - a timeout, a rate limit - that has cleared by the
-    logged-out try. So one rejection is not enough: the cookies are set aside,
-    and the owner alerted, only after `rejections_to_suspend` requests in a
-    row turned them down. Any request they worked for starts the count over."""
-
-    def __init__(
-        self,
-        cookies_file: str,
-        retry_after: float = COOKIE_RETRY_SECONDS,
-        alert_every: float = COOKIE_ALERT_INTERVAL_SECONDS,
-        rejections_to_suspend: int = COOKIE_REJECTIONS_TO_SUSPEND,
-        clock: Callable[[], float] = time.monotonic,
-    ) -> None:
-        self.cookies_file = cookies_file
-        self.retry_after = retry_after
-        self.alert_every = alert_every
-        self.rejections_to_suspend = rejections_to_suspend
-        self._clock = clock
-        # Downloads run in worker threads, several at a time.
-        self._lock = threading.Lock()
-        self._rejections_in_a_row = 0
-        self._suspended_until = float("-inf")
-        self._last_alert = float("-inf")
-        self._alert_pending = False
-
-    def use_cookies(self) -> bool:
-        with self._lock:
-            return bool(self.cookies_file) and self._clock() >= self._suspended_until
-
-    def mark_accepted(self) -> None:
-        with self._lock:
-            self._rejections_in_a_row = 0
-
-    def mark_rejected(self) -> bool:
-        """Count a request the cookies were turned down on. Returns whether
-        that made enough in a row to set them aside."""
-        now = self._clock()
-        with self._lock:
-            self._rejections_in_a_row += 1
-            if self._rejections_in_a_row < self.rejections_to_suspend:
-                return False
-
-            # Once they are tried again, it takes a full count of rejections
-            # to set them aside again.
-            self._rejections_in_a_row = 0
-            self._suspended_until = now + self.retry_after
-            if now - self._last_alert >= self.alert_every:
-                self._last_alert = now
-                self._alert_pending = True
-            return True
-
-    def take_alert(self) -> bool:
-        with self._lock:
-            pending, self._alert_pending = self._alert_pending, False
-            return pending
-
-
-INSTAGRAM_SESSION = InstagramSession(config.COOKIES_FILE)
 
 
 def build_ydl_opts(download_dir: Path, use_cookies: bool = True) -> dict[str, Any]:
@@ -459,64 +355,66 @@ def probe_post(url: str, download_dir: Path, use_cookies: bool = True) -> dict[s
 T = TypeVar("T")
 
 
-def with_cookie_fallback(url: str, attempt: Callable[[bool], T], fall_back: bool = True) -> Tuple[T, bool]:
-    """Run attempt(use_cookies) with the session cookies while they are
-    trusted, and again without them when that fails - unless told not to
-    fall back. Returns the result and whether the cookies were used.
-
-    Only the probe goes through this - it is the one request to Instagram's
-    API a post takes. The videos are downloaded from what the probe returned,
-    straight from the CDN, with nothing for the cookies to be turned down on."""
-    if not INSTAGRAM_SESSION.use_cookies():
-        return attempt(False), False
-
-    try:
-        result = attempt(True)
-    except YoutubeDLError as cookie_error:
-        if not fall_back:
-            raise
-        try:
-            result = attempt(False)
-        except YoutubeDLError:
-            # Failed both ways: the post is the problem - private, deleted -
-            # not the session. Report what the primary route said.
-            raise cookie_error from None
-    else:
-        INSTAGRAM_SESSION.mark_accepted()
-        return result, True
-
-    if INSTAGRAM_SESSION.mark_rejected():
-        logger.warning(
-            "Instagram turned down the session cookies for %s but served it without them, "
-            "%d requests in a row now; going without cookies for %d min. Refresh INSTAGRAM_COOKIES_B64.",
-            url,
-            INSTAGRAM_SESSION.rejections_to_suspend,
-            COOKIE_RETRY_SECONDS // 60,
-        )
-    else:
-        logger.warning(
-            "Instagram turned down the session cookies for %s but served it without them; "
-            "keeping them for now, in case it was a one-off",
-            url,
-        )
-    return result, False
-
-
 # Instagram shows a story, and someone's current stories, only to an account
-# that is logged in. Without the cookies they can't come through, so they are
-# not asked for again without them: that would be one more request from the
-# server's address, for nothing, to an Instagram that counts them. A
-# highlight is still tried without them: some accounts' highlights open
-# logged out.
+# that is logged in: they go with the session alone. A highlight goes the way
+# a post does - some accounts' highlights open logged out.
 LOGIN_ONLY_STORY_KINDS = (links.STORY, links.STORIES)
 
 
+def with_session_fallback(url: str, attempt: Callable[[bool], T]) -> Tuple[T, bool]:
+    """Run attempt(use_cookies) logged out first, and with the session when
+    that fails and there is one. Returns the result and whether the session
+    was used.
+
+    Logged out first, so that the session makes as few requests as it can.
+    Instagram holds back an account that downloads for everyone: two in a
+    row were answered 429 on the search and given empty story lists within
+    hours of going on the bot, while a public post comes through logged out.
+    The session is kept for what needs it - stories, which go with it alone,
+    and whatever Instagram will not serve logged out.
+
+    Failing both ways reports the logged-out error: the post is the problem -
+    private, deleted - or both routes are down. Whether the session itself
+    still works is the daily check's to find out (canary), not a guess from
+    one post.
+
+    Only the probe goes through this - the one request to Instagram's API a
+    post takes. The videos are downloaded from what it returned, straight
+    from the CDN."""
+    has_session = bool(config.COOKIES_FILE)
+    if links.story_kind(url) in LOGIN_ONLY_STORY_KINDS:
+        return attempt(has_session), has_session
+
+    try:
+        return attempt(False), False
+    except YoutubeDLError as logged_out_error:
+        if not has_session:
+            raise
+        try:
+            result = attempt(True)
+        except YoutubeDLError:
+            raise logged_out_error from None
+
+    # How often the session is still needed: the measure of whether logged
+    # out is enough from the server's address.
+    logger.info("Instagram served %s only to the session", url)
+    return result, True
+
+
 def probe_post_with_fallback(url: str, download_dir: Path) -> Tuple[dict[str, Any], bool]:
-    return with_cookie_fallback(
-        url,
-        lambda use_cookies: probe_post(url, download_dir, use_cookies),
-        fall_back=links.story_kind(url) not in LOGIN_ONLY_STORY_KINDS,
-    )
+    return with_session_fallback(url, lambda use_cookies: probe_post(url, download_dir, use_cookies))
+
+
+def session_error(url: str, download_dir: Path) -> Optional[YoutubeDLError]:
+    """What stops Instagram from serving url to the session - None when it
+    serves it. For the daily check: posts no longer tell, since they only go
+    with the session once the logged-out route has failed. Meant for when
+    there is a session: without one this is just a logged-out probe."""
+    try:
+        probe_post(url, download_dir, use_cookies=True)
+    except YoutubeDLError as error:
+        return error
+    return None
 
 
 def post_entries(info: dict[str, Any]) -> list[dict[str, Any]]:

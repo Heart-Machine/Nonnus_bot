@@ -344,7 +344,7 @@ def test_past_the_limit_a_cached_post_still_comes(monkeypatch, preparations, sen
 def test_without_a_storage_chat_the_limit_holds_too(monkeypatch, sent):
     downloads = []
 
-    async def download_post_in_thread(url, temp_dir, context):
+    async def download_post_in_thread(url, temp_dir):
         downloads.append(url)
         raise RuntimeError("private post")
 

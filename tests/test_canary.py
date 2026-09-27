@@ -36,11 +36,6 @@ def no_waiting(monkeypatch):
     monkeypatch.setattr(canary, "FIRST_CHECK_DELAY_SECONDS", 0)
     monkeypatch.setattr(canary, "CHECK_INTERVAL_SECONDS", 0)
 
-    async def no_alert(context):
-        pass
-
-    monkeypatch.setattr(preparation, "alert_if_cookies_rejected", no_alert)
-
 
 # --- one check ------------------------------------------------------------
 
@@ -143,6 +138,107 @@ def test_without_a_storage_chat_the_result_is_only_logged(monkeypatch):
     asyncio.run(canary.tell_owner(bot, "text"))
 
     assert bot.sent == []
+
+
+# --- the session ----------------------------------------------------------
+
+
+def run_session_checks(monkeypatch, outcomes):
+    """Run the loop with the download passing every time and the session
+    check giving the outcomes - None when Instagram serves the post to the
+    session, an error when it does not - and return what the owner was
+    sent."""
+    monkeypatch.setattr(config, "STORAGE_CHAT_ID", "-100")
+    monkeypatch.setattr(config, "COOKIES_FILE", "cookies.txt")
+    # The rounds are counted by the download check, so a loop that skips
+    # the session check still comes to an end - and fails the test.
+    remaining = list(outcomes)
+    this_round = []
+
+    async def check_once(bot, url):
+        if not remaining:
+            raise asyncio.CancelledError
+        this_round[:] = [remaining.pop(0)]
+        return None
+
+    async def check_session(url):
+        return this_round[0]
+
+    monkeypatch.setattr(canary, "check_once", check_once)
+    monkeypatch.setattr(canary, "check_session", check_session)
+    bot = RecordingBot()
+
+    async def run():
+        with pytest.raises(asyncio.CancelledError):
+            await canary.run(bot, POST_URL)
+
+    asyncio.run(run())
+    return [message["text"] for message in bot.sent]
+
+
+def test_the_owner_hears_once_when_the_session_stops_working_and_once_when_it_is_back(monkeypatch):
+    turned_away = RuntimeError("HTTP Error 429: Too Many Requests")
+
+    sent = run_session_checks(monkeypatch, [None, turned_away, turned_away, None, None])
+
+    assert len(sent) == 2
+    assert "не пускает сессию бота" in sent[0]
+    assert sent[1] == canary.SESSION_RECOVERY_TEXT
+
+
+def test_a_working_session_says_nothing(monkeypatch):
+    assert run_session_checks(monkeypatch, [None, None]) == []
+
+
+def test_without_cookies_there_is_no_session_to_check(monkeypatch):
+    async def check_session(url):
+        raise AssertionError("checked a session there is none of")
+
+    monkeypatch.setattr(canary, "check_session", check_session)
+
+    assert run_checks(monkeypatch, [None, None]) == []
+
+
+def test_the_session_check_asks_for_the_post_with_the_session_alone(monkeypatch):
+    monkeypatch.setattr(config, "COOKIES_FILE", "cookies.txt")
+    asked = []
+
+    def probe_post(url, download_dir, use_cookies=True):
+        asked.append((url, use_cookies))
+        return {"id": "post"}
+
+    monkeypatch.setattr(instagram, "probe_post", probe_post)
+
+    assert asyncio.run(canary.check_session(POST_URL)) is None
+    assert asked == [(POST_URL, True)]
+
+
+def test_the_session_check_says_what_instagram_answered(monkeypatch):
+    turned_away = instagram.YoutubeDLError("HTTP Error 429: Too Many Requests")
+
+    def probe_post(url, download_dir, use_cookies=True):
+        raise turned_away
+
+    monkeypatch.setattr(instagram, "probe_post", probe_post)
+
+    assert asyncio.run(canary.check_session(POST_URL)) is turned_away
+
+
+def test_a_share_link_instagram_will_not_resolve_fails_the_session_check(monkeypatch):
+    async def resolve_link(url):
+        return None
+
+    monkeypatch.setattr(preparation, "resolve_link", resolve_link)
+
+    assert isinstance(asyncio.run(canary.check_session("https://www.instagram.com/share/abc")), RuntimeError)
+
+
+def test_the_session_alert_says_what_failed_and_what_to_do():
+    text = canary.session_failure_text(POST_URL, RuntimeError("x" * 1000))
+
+    assert POST_URL in text
+    assert "RuntimeError: " + "x" * canary.ERROR_EXCERPT_LENGTH + "\n" in text
+    assert "INSTAGRAM_COOKIES_B64" in text and "сторис" in text
 
 
 # --- starting and stopping ------------------------------------------------
