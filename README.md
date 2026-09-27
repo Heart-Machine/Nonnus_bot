@@ -255,6 +255,8 @@ ENABLE_VIDEO_COMPRESSION=false
 
 Основные настройки:
 
+По умолчанию `MAX_FILE_SIZE_MB` - сколько принимает от бота сервер Bot API: 50 МБ облачный, 2000 МБ свой (см. «Свой сервер Bot API»); `VIDEO_COMPRESSION_TARGET_MB` - на 1 МБ меньше. Заданные значения важнее.
+
 ```env
 MAX_FILE_SIZE_MB=50
 VIDEO_COMPRESSION_TARGET_MB=49
@@ -381,7 +383,7 @@ sudo chown -R YOUR_SSH_USER:YOUR_SSH_USER /opt/nonnus_bot/data
 
 ### Свой сервер Bot API
 
-По умолчанию бот работает через облачный Bot API `api.telegram.org`: он принимает от бота файлы до 50 МБ и запрос до 60 МиБ. Свой сервер (`tdlib/telegram-bot-api` в режиме `--local`) принимает файлы до 2000 МБ. Его образ собирает workflow `bot-api-image.yml`, а деплой поднимает рядом с ботом, когда задана repository variable `LOCAL_BOT_API=true`.
+По умолчанию бот работает через облачный Bot API `api.telegram.org`: он принимает от бота файлы до 50 МБ и запрос до 60 МиБ. Свой сервер (`tdlib/telegram-bot-api` в режиме `--local`) принимает файлы до 2000 МБ. С ним по умолчанию `MAX_FILE_SIZE_MB` - 2000, а `UPLOAD_TIMEOUT_SECONDS` - 900 с вместо 180: сервер отвечает, когда уже передал файл в Telegram. Если заданы repository variables с этими именами, берутся они. Его образ собирает workflow `bot-api-image.yml`, а деплой поднимает рядом с ботом, когда задана repository variable `LOCAL_BOT_API=true`.
 
 Что нужно для переезда:
 
@@ -491,7 +493,7 @@ pip install -U yt-dlp
 
 **Файл слишком большой**
 
-Увеличьте `MAX_FILE_SIZE_MB`, если ваш Telegram Bot API принимает файлы такого размера, или скачивайте более низкое качество, изменив параметр `format` в `download_post_videos` (`nonnus/instagram.py`).
+Облачный Bot API больше 50 МБ от бота не принимает: видео крупнее бот сжимает, а то, что не сжать, не отправит. Свой сервер Bot API поднимает предел до 2000 МБ - см. «Свой сервер Bot API». Ещё можно скачивать более низкое качество, изменив параметр `format` в `download_post_videos` (`nonnus/instagram.py`).
 
 ## Лицензия
 

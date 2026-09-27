@@ -22,6 +22,14 @@ def env_bool(name: str, default: bool) -> bool:
     return value.strip().lower() in {"1", "true", "yes", "y", "on"}
 
 
+def env_int(name: str, default: int) -> int:
+    """An integer setting; unset and empty alike take the default. The deploy
+    writes a setting it has no value for as an empty line in .env, which the
+    bot is then to work out itself."""
+    value = os.getenv(name, "").strip()
+    return int(value) if value else default
+
+
 def env_int_list(name: str, default: list[int]) -> list[int]:
     value = os.getenv(name, "").strip()
     if not value:
@@ -42,19 +50,34 @@ BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 COOKIES_FILE = os.getenv("COOKIES_FILE", "").strip()
 
 
-MAX_FILE_SIZE_MB = int(os.getenv("MAX_FILE_SIZE_MB", "50"))
+# The Bot API server the bot talks to: empty for Telegram's cloud one at
+# api.telegram.org, or the address of a server of its own
+# (tdlib/telegram-bot-api run with --local), such as
+# http://telegram-bot-api:8081 - which takes files of up to 2000 MB and a
+# request of any size.
+TELEGRAM_API_URL = os.getenv("TELEGRAM_API_URL", "").strip().rstrip("/")
+
+
+# The largest file the bot sends; a video above it is compressed to fit. By
+# default what the Bot API server takes from a bot: 50 MB on the cloud one,
+# 2000 MB on a server of the bot's own.
+MAX_FILE_SIZE_MB = env_int("MAX_FILE_SIZE_MB", 2000 if TELEGRAM_API_URL else 50)
 
 
 MAX_FILE_SIZE_BYTES = MAX_FILE_SIZE_MB * 1024 * 1024
 
 
-UPLOAD_TIMEOUT_SECONDS = int(os.getenv("UPLOAD_TIMEOUT_SECONDS", "180"))
+# How long to wait for Telegram to answer an upload. A server of the bot's
+# own answers once it has passed the file on to Telegram, and a 2000 MB file
+# takes a while: 900 s is a little over 2 MB/s, a guess on the safe side
+# rather than a measurement.
+UPLOAD_TIMEOUT_SECONDS = env_int("UPLOAD_TIMEOUT_SECONDS", 900 if TELEGRAM_API_URL else 180)
 
 
 ENABLE_VIDEO_COMPRESSION = env_bool("ENABLE_VIDEO_COMPRESSION", True)
 
 
-VIDEO_COMPRESSION_TARGET_MB = int(os.getenv("VIDEO_COMPRESSION_TARGET_MB", str(max(MAX_FILE_SIZE_MB - 1, 1))))
+VIDEO_COMPRESSION_TARGET_MB = env_int("VIDEO_COMPRESSION_TARGET_MB", max(MAX_FILE_SIZE_MB - 1, 1))
 
 
 VIDEO_COMPRESSION_TARGET_BYTES = VIDEO_COMPRESSION_TARGET_MB * 1024 * 1024
@@ -146,14 +169,6 @@ INLINE_CACHE_FILE = Path(os.getenv("INLINE_CACHE_FILE", str(BASE_DIR / ".inline_
 
 if not INLINE_CACHE_FILE.is_absolute():
     INLINE_CACHE_FILE = BASE_DIR / INLINE_CACHE_FILE
-
-
-# The Bot API server the bot talks to: empty for Telegram's cloud one at
-# api.telegram.org, or the address of a server of its own
-# (tdlib/telegram-bot-api run with --local), such as
-# http://telegram-bot-api:8081 - which takes files of up to 2000 MB and a
-# request of any size.
-TELEGRAM_API_URL = os.getenv("TELEGRAM_API_URL", "").strip().rstrip("/")
 
 
 # Where the bot notes that it has logged out of the cloud Bot API, which it

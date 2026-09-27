@@ -6,6 +6,10 @@ so what is checked is when it is asked, and what the bot remembers of it.
 """
 import asyncio
 import logging
+import os
+from pathlib import Path
+import subprocess
+import sys
 
 import pytest
 from telegram.error import NetworkError
@@ -150,6 +154,48 @@ def test_main_leaves_the_cloud_before_the_bot_starts(monkeypatch):
     app.main()
 
     assert calls == ["logging", ("settle", TOKEN), "polling"]
+
+
+# --- how large a file may be ---------------------------------------------------------
+
+
+def size_settings(**env):
+    """MAX_FILE_SIZE_MB, VIDEO_COMPRESSION_TARGET_MB and UPLOAD_TIMEOUT_SECONDS
+    as the bot works them out from this environment - in an interpreter of
+    their own, since config reads the environment once, on import. Empty is
+    what the deploy writes for a setting that is not set."""
+    environment = {
+        **os.environ,
+        "TELEGRAM_API_URL": "",
+        "MAX_FILE_SIZE_MB": "",
+        "VIDEO_COMPRESSION_TARGET_MB": "",
+        "UPLOAD_TIMEOUT_SECONDS": "",
+        **env,
+    }
+    script = (
+        "from nonnus import config; "
+        "print(config.MAX_FILE_SIZE_MB, config.VIDEO_COMPRESSION_TARGET_MB, config.UPLOAD_TIMEOUT_SECONDS)"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", script], env=environment, cwd=Path(__file__).resolve().parent.parent,
+        capture_output=True, text=True, check=True,
+    )
+    return tuple(int(value) for value in result.stdout.split())
+
+
+def test_on_the_cloud_a_file_is_up_to_50_mb():
+    assert size_settings() == (50, 49, 180)
+
+
+def test_on_the_bot_s_own_server_a_file_is_up_to_2000_mb():
+    # What the server takes with --local; a longer wait for the answer, which
+    # comes once the server has passed the file on to Telegram.
+    assert size_settings(TELEGRAM_API_URL=SERVER) == (2000, 1999, 900)
+
+
+def test_a_limit_that_is_set_wins_and_compression_follows_it():
+    assert size_settings(TELEGRAM_API_URL=SERVER, MAX_FILE_SIZE_MB="300") == (300, 299, 900)
+    assert size_settings(MAX_FILE_SIZE_MB="40", UPLOAD_TIMEOUT_SECONDS="60") == (40, 39, 60)
 
 
 # --- what a request may carry -------------------------------------------------------
