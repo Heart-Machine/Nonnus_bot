@@ -1,5 +1,6 @@
 """Wiring the handlers into the application."""
 
+import asyncio
 import logging
 import re
 from typing import Any
@@ -16,7 +17,7 @@ from telegram.ext import (
     filters,
 )
 
-from nonnus import config, inline, handlers, admin, canary, menu
+from nonnus import config, inline, handlers, admin, bot_api, canary, menu
 
 
 LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s: %(message)s"
@@ -137,9 +138,14 @@ async def stop_background_jobs(application: Application) -> None:
 
 
 def build_application(token: str) -> Application:
+    builder = Application.builder().token(token)
+    # A server of the bot's own takes plain multipart uploads as they are, up
+    # to 2000 MB, so the library's local_mode - which only turns paths into
+    # file:// URIs, while the bot hands it open files - stays off.
+    if urls := bot_api.base_urls():
+        builder = builder.base_url(urls[0]).base_file_url(urls[1])
     app = (
-        Application.builder()
-        .token(token)
+        builder
         .read_timeout(config.UPLOAD_TIMEOUT_SECONDS)
         .write_timeout(config.UPLOAD_TIMEOUT_SECONDS)
         .connect_timeout(30)
@@ -170,4 +176,7 @@ def main() -> None:
     if not config.BOT_TOKEN:
         raise RuntimeError("Set BOT_TOKEN in .env or environment variables")
 
+    # Before the application starts: it asks the server for the bot at once,
+    # and the bot is to leave the cloud before its own server takes it.
+    asyncio.run(bot_api.settle_on_server(config.BOT_TOKEN))
     build_application(config.BOT_TOKEN).run_polling(allowed_updates=Update.ALL_TYPES)

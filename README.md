@@ -305,7 +305,7 @@ Workflow `.github/workflows/bot-api-image.yml` собирает из исход�
 4. Ждёт ручного подтверждения в окружении `production`.
 5. Подключается к серверу по SSH.
 6. Создает/обновляет `.env` и `docker-compose.yml` на сервере.
-7. Выполняет `docker compose pull` и `docker compose up -d`.
+7. Выполняет `docker compose pull` и `docker compose up -d --remove-orphans`.
 
 Подтверждения ждёт только самый свежий push: каждый новый push в `main` отменяет предыдущий запуск, на каком бы этапе он ни был - проверки, сборка или ожидание подтверждения. Можно смержить несколько pull request подряд и подтвердить один деплой - он выкатит их все. Отменённые запуски в Actions будут помечены как cancelled, это нормально.
 
@@ -327,6 +327,8 @@ SSH_PRIVATE_KEY
 SSH_PORT
 INSTAGRAM_COOKIES_B64
 ADMIN_USER_IDS
+TELEGRAM_API_ID
+TELEGRAM_API_HASH
 ```
 
 `ADMIN_USER_IDS` - Telegram ID админов бота через запятую, см. «Статусы пользователей и дневной лимит». Без него команды админа некому выполнять.
@@ -360,6 +362,7 @@ MAX_PARALLEL_DOWNLOADS
 CANARY_POST_URL
 DAILY_DOWNLOAD_LIMIT
 DAILY_LIMIT_TIMEZONE
+LOCAL_BOT_API
 ```
 
 Если `DEPLOY_PATH` не задан, деплой идет в:
@@ -375,6 +378,20 @@ $HOME/instagram-reels-bot
 ```bash
 sudo chown -R YOUR_SSH_USER:YOUR_SSH_USER /opt/nonnus_bot/data
 ```
+
+### Свой сервер Bot API
+
+По умолчанию бот работает через облачный Bot API `api.telegram.org`: он принимает от бота файлы до 50 МБ и запрос до 60 МиБ. Свой сервер (`tdlib/telegram-bot-api` в режиме `--local`) принимает файлы до 2000 МБ. Его образ собирает workflow `bot-api-image.yml`, а деплой поднимает рядом с ботом, когда задана repository variable `LOCAL_BOT_API=true`.
+
+Что нужно для переезда:
+
+1. `api_id` и `api_hash` с my.telegram.org (API development tools → создать приложение) в секретах окружения `production`: `TELEGRAM_API_ID` и `TELEGRAM_API_HASH`. Через VPN my.telegram.org может отвечать на создание приложения просто `ERROR`.
+2. С сервера должны быть доступны дата-центры Telegram: свой сервер подключается к ним напрямую, а не через `api.telegram.org`.
+3. Repository variable `LOCAL_BOT_API=true` и деплой. Именно переменная репозитория (Settings → Secrets and variables → Actions → Variables), а не окружения `production`: её читает и задача сборки, которая закрепляет образ сервера, а окружения у неё нет.
+
+При первом запуске на своём сервере бот сам выходит из облачного (`logOut`) - так требует Telegram - и пишет об этом в лог. Данные сервера лежат в `data/telegram-bot-api`, порт сервера наружу не открыт.
+
+Откат: удалите `LOCAL_BOT_API` (или поставьте не `true`) и задеплойте. Контейнер сервера остановится, бот вернётся на `api.telegram.org`. После выхода из облака Telegram пускает туда бота не раньше чем через 10 минут, поэтому первые минуты после отката контейнер бота будет перезапускаться - это нормально.
 
 ## Безопасность
 
@@ -425,6 +442,7 @@ sudo chown -R YOUR_SSH_USER:YOUR_SSH_USER /opt/nonnus_bot/data
 | `admin.py` | команды админа: `/role`, `/users` |
 | `menu.py` | меню команд: `/start` для всех, команды админа - только в меню админов |
 | `canary.py` | ежедневная проверка, что загрузка из Instagram работает |
+| `bot_api.py` | какой сервер Bot API: облачный или свой; выход из облака при переезде |
 | `app.py` | сборка приложения и запуск |
 
 Зависимости идут в одну сторону, сверху вниз по таблице: `instagram` и `media` ничего не знают о Telegram, а `app` собирает всё вместе.

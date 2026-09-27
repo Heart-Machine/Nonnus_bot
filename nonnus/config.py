@@ -146,3 +146,17 @@ INLINE_CACHE_FILE = Path(os.getenv("INLINE_CACHE_FILE", str(BASE_DIR / ".inline_
 
 if not INLINE_CACHE_FILE.is_absolute():
     INLINE_CACHE_FILE = BASE_DIR / INLINE_CACHE_FILE
+
+
+# The Bot API server the bot talks to: empty for Telegram's cloud one at
+# api.telegram.org, or the address of a server of its own
+# (tdlib/telegram-bot-api run with --local), such as
+# http://telegram-bot-api:8081 - which takes files of up to 2000 MB and a
+# request of any size.
+TELEGRAM_API_URL = os.getenv("TELEGRAM_API_URL", "").strip().rstrip("/")
+
+
+# Where the bot notes that it has logged out of the cloud Bot API, which it
+# does once, the first time it runs on its own server. Next to the
+# databases, in the directory that outlives the container.
+CLOUD_LOGOUT_MARKER = INLINE_CACHE_DB.parent / "cloud-bot-api-logged-out"
