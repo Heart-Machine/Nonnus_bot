@@ -110,13 +110,16 @@ jobs:
           IMAGE: ${{ needs.build.outputs.image }}
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
           STORAGE_CHAT_ID: ${{ secrets.STORAGE_CHAT_ID }}
-          MAX_FILE_SIZE_MB: ${{ vars.MAX_FILE_SIZE_MB || '50' }}
+          # These three go as they are, empty when not set: their defaults
+          # depend on the Bot API server - 50 MB on the cloud one, 2000 MB on
+          # the bot's own - and the bot works them out (nonnus/config.py).
+          MAX_FILE_SIZE_MB: ${{ vars.MAX_FILE_SIZE_MB }}
           PHOTO_MAX_FILE_SIZE_MB: ${{ vars.PHOTO_MAX_FILE_SIZE_MB || '10' }}
           PHOTO_MAX_DIMENSION: ${{ vars.PHOTO_MAX_DIMENSION || '2560' }}
           PHOTO_DOWNLOAD_TIMEOUT_SECONDS: ${{ vars.PHOTO_DOWNLOAD_TIMEOUT_SECONDS || '60' }}
-          UPLOAD_TIMEOUT_SECONDS: ${{ vars.UPLOAD_TIMEOUT_SECONDS || '180' }}
+          UPLOAD_TIMEOUT_SECONDS: ${{ vars.UPLOAD_TIMEOUT_SECONDS }}
           ENABLE_VIDEO_COMPRESSION: ${{ vars.ENABLE_VIDEO_COMPRESSION || 'true' }}
-          VIDEO_COMPRESSION_TARGET_MB: ${{ vars.VIDEO_COMPRESSION_TARGET_MB || '49' }}
+          VIDEO_COMPRESSION_TARGET_MB: ${{ vars.VIDEO_COMPRESSION_TARGET_MB }}
           VIDEO_COMPRESSION_HEIGHTS: ${{ vars.VIDEO_COMPRESSION_HEIGHTS || '1280,854,640' }}
           VIDEO_COMPRESSION_AUDIO_KBPS: ${{ vars.VIDEO_COMPRESSION_AUDIO_KBPS || '96' }}
           VIDEO_COMPRESSION_PRESET: ${{ vars.VIDEO_COMPRESSION_PRESET || 'veryfast' }}
