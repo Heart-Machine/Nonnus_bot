@@ -42,11 +42,6 @@ class ConcurrencyMeter:
 def two_slots(monkeypatch):
     monkeypatch.setattr(preparation, "DOWNLOAD_SLOTS", asyncio.Semaphore(2))
 
-    async def no_alert(context):
-        pass
-
-    monkeypatch.setattr(preparation, "alert_if_cookies_rejected", no_alert)
-
 
 def run_side_by_side(count, make_call):
     async def all_at_once():
@@ -59,7 +54,7 @@ def test_downloads_take_turns_past_the_cap(monkeypatch, tmp_path, two_slots):
     meter = ConcurrencyMeter()
     monkeypatch.setattr(instagram, "download_post", meter)
 
-    run_side_by_side(6, lambda: preparation.download_post_in_thread("url", tmp_path, None))
+    run_side_by_side(6, lambda: preparation.download_post_in_thread("url", tmp_path))
 
     assert meter.peak == 2
 
@@ -68,7 +63,7 @@ def test_downloads_under_the_cap_run_together(monkeypatch, tmp_path, two_slots):
     meter = ConcurrencyMeter()
     monkeypatch.setattr(instagram, "download_post", meter)
 
-    run_side_by_side(2, lambda: preparation.download_post_in_thread("url", tmp_path, None))
+    run_side_by_side(2, lambda: preparation.download_post_in_thread("url", tmp_path))
 
     assert meter.peak == 2
 

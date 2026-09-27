@@ -223,7 +223,7 @@ async def _deliver_post(message, url: str, context: ContextTypes.DEFAULT_TYPE, s
     temp_dir = Path(tempfile.mkdtemp(prefix="ig_post_"))
     try:
         try:
-            items, caption = await preparation.download_post_in_thread(url, temp_dir, context)
+            items, caption = await preparation.download_post_in_thread(url, temp_dir)
         # A post that could not be downloaded does not use up the limit.
         except instagram.NoMediaInPostError:
             users.give_back_download(download)

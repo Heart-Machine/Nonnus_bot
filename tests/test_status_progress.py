@@ -306,20 +306,15 @@ def test_waiting_for_a_slot_is_reported(monkeypatch, tmp_path):
         tracker.subscribe(lambda *stage: heard.append(stage[0]))
         progress.CURRENT.set(tracker)
         await preparation.DOWNLOAD_SLOTS.acquire()
-        waiting = asyncio.create_task(preparation.download_post_in_thread(POST_URL, tmp_path, None))
+        waiting = asyncio.create_task(preparation.download_post_in_thread(POST_URL, tmp_path))
         await asyncio.sleep(0.05)
         preparation.DOWNLOAD_SLOTS.release()
         await waiting
         await asyncio.sleep(0)
 
-    monkeypatch.setattr(preparation, "alert_if_cookies_rejected", _no_alert)
     asyncio.run(run())
 
     assert heard == [progress.QUEUED, progress.DOWNLOADING]
-
-
-async def _no_alert(context):
-    pass
 
 
 # --- deliver_post ---------------------------------------------------------
@@ -358,7 +353,6 @@ def slow_carousel(monkeypatch):
     """A storage-chat setup where downloading a three-file post takes a
     moment, reporting each file, and the upload is a stand-in."""
     monkeypatch.setattr(config, "STORAGE_CHAT_ID", "-100")
-    monkeypatch.setattr(preparation, "alert_if_cookies_rejected", _no_alert)
 
     def download_post(url, download_dir):
         import time

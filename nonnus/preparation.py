@@ -11,7 +11,6 @@ from pathlib import Path
 from urllib.parse import urlparse
 from typing import Any, Optional, Tuple
 
-from telegram.error import TelegramError
 from telegram.ext import ContextTypes
 
 from nonnus import config, links, media, instagram, cache, delivery, progress, users
@@ -51,38 +50,14 @@ async def resolve_link(url: str) -> Optional[str]:
     return post
 
 
-async def alert_if_cookies_rejected(context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Tell the owner in the storage chat that the session cookies stopped
-    working. Downloads carry on without them meanwhile; this is so it gets
-    noticed before someone sends a post that needs a login, not after."""
-    if not instagram.INSTAGRAM_SESSION.take_alert() or not config.STORAGE_CHAT_ID:
-        return
-
+async def download_post_in_thread(url: str, download_dir: Path) -> Tuple[list[media.MediaItem], str]:
+    """download_post off the event loop, in one of the download slots."""
+    await take_slot_reporting_the_wait()
     try:
-        await context.bot.send_message(chat_id=delivery.parse_storage_chat_id(), text=instagram.COOKIE_ALERT_TEXT)
-    except TelegramError:
-        logger.exception("Failed to send the Instagram cookie alert to the storage chat")
-
-
-async def download_post_in_thread(
-    url: str,
-    download_dir: Path,
-    context: ContextTypes.DEFAULT_TYPE,
-) -> Tuple[list[media.MediaItem], str]:
-    """download_post off the event loop. The download only notes that the
-    cookies were turned down - it runs in a worker thread and cannot talk to
-    Telegram - so the alert goes out from here, and in `finally`: the owner
-    should hear about the cookies even when the post then fails for some
-    other reason."""
-    try:
-        await take_slot_reporting_the_wait()
-        try:
-            progress.report(progress.DOWNLOADING)
-            return await asyncio.to_thread(instagram.download_post, url, download_dir)
-        finally:
-            DOWNLOAD_SLOTS.release()
+        progress.report(progress.DOWNLOADING)
+        return await asyncio.to_thread(instagram.download_post, url, download_dir)
     finally:
-        await alert_if_cookies_rejected(context)
+        DOWNLOAD_SLOTS.release()
 
 
 async def prepare_items_in_thread(items: list[media.MediaItem], work_dir: Path) -> Tuple[list[media.MediaItem], bool]:
@@ -137,7 +112,7 @@ async def prepare_inline_post(
 
 
 async def _prepare(url: str, context: ContextTypes.DEFAULT_TYPE, temp_dir: Path) -> dict[str, Any]:
-    items, caption = await download_post_in_thread(url, temp_dir, context)
+    items, caption = await download_post_in_thread(url, temp_dir)
     items, compressed = await prepare_items_in_thread(items, temp_dir)
     caption = media.add_compression_note_if_needed(caption, compressed)
     media.ensure_items_fit_telegram(items)
