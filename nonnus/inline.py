@@ -100,6 +100,17 @@ def inline_item_result_id(url: str, index: int, total: int) -> str:
 
 
 CAROUSEL_BUTTON_TEXT = "Посмотреть карусель"
+STORIES_BUTTON_TEXT = "Посмотреть все сторис"
+HIGHLIGHT_BUTTON_TEXT = "Посмотреть весь хайлайт"
+
+
+def carousel_button_text(url: str) -> str:
+    kind = links.story_kind(url)
+    if kind == links.STORIES:
+        return STORIES_BUTTON_TEXT
+    if kind == links.HIGHLIGHT:
+        return HIGHLIGHT_BUTTON_TEXT
+    return CAROUSEL_BUTTON_TEXT
 
 
 def carousel_keyboard(url: str, bot_username: str) -> Optional[InlineKeyboardMarkup]:
@@ -114,7 +125,7 @@ def carousel_keyboard(url: str, bot_username: str) -> Optional[InlineKeyboardMar
         return None
 
     return InlineKeyboardMarkup(
-        [[InlineKeyboardButton(CAROUSEL_BUTTON_TEXT, url=f"https://t.me/{bot_username}?start={payload}")]]
+        [[InlineKeyboardButton(carousel_button_text(url), url=f"https://t.me/{bot_username}?start={payload}")]]
     )
 
 

@@ -142,6 +142,9 @@ START_PAYLOAD_POST_TYPES = {"p", "reel", "reels", "tv"}
 INSTAGRAM_SHORTCODE_RE = re.compile(r"[A-Za-z0-9_-]+")
 
 
+INSTAGRAM_USERNAME_RE = re.compile(r"[A-Za-z0-9._]{1,30}")
+
+
 def post_start_payload(url: str) -> Optional[str]:
     """Name a post in a /start deep link as `<type>_<shortcode>`.
 
@@ -151,11 +154,17 @@ def post_start_payload(url: str) -> Optional[str]:
     leaves no spare character for a separator, but none of the post types
     contains an underscore, so splitting on the first one is unambiguous.
 
-    A highlight is `highlight_<id>`. A story link has no payload: it needs the
-    username, which may hold a dot, and a dot does not fit."""
+    A highlight is `highlight_<id>`, and someone's current stories are
+    `stories_<username>` with every dot of the username as a hyphen: a dot
+    does not fit, and an Instagram username - letters, digits, underscores
+    and dots - never holds a hyphen, so the swap reads back unambiguously. A
+    single story has no payload: it is one file, with no album to open."""
     parts = [part for part in urlparse(normalize_post_url(url)).path.split("/") if part]
-    if story_kind(url) == HIGHLIGHT:
+    kind = story_kind(url)
+    if kind == HIGHLIGHT:
         return f"{HIGHLIGHT}_{parts[2]}"
+    if kind == STORIES:
+        return f"{STORIES}_{parts[1].replace('.', '-')}"
     if len(parts) != 2:
         return None
 
@@ -173,6 +182,11 @@ def post_url_from_start_payload(payload: str) -> Optional[str]:
     post_type, _, shortcode = payload.partition("_")
     if post_type == HIGHLIGHT and shortcode.isdigit():
         return f"https://www.instagram.com/stories/highlights/{shortcode}/"
+    if post_type == STORIES:
+        username = shortcode.replace("-", ".")
+        if not INSTAGRAM_USERNAME_RE.fullmatch(username):
+            return None
+        return f"https://www.instagram.com/stories/{username.lower()}/"
     if post_type not in START_PAYLOAD_POST_TYPES or not INSTAGRAM_SHORTCODE_RE.fullmatch(shortcode):
         return None
 

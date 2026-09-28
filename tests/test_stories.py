@@ -77,6 +77,39 @@ def test_a_highlight_has_a_deep_link_and_a_story_does_not():
     assert links.post_start_payload(f"https://www.instagram.com/stories/some.one/{STORY_PK}/") is None
 
 
+@pytest.mark.parametrize(
+    "username, payload",
+    [("some.one", "stories_some-one"), ("a_b.c.d", "stories_a_b-c-d"), ("plain", "stories_plain")],
+)
+def test_someone_s_stories_have_a_deep_link_that_reads_back(username, payload):
+    # A dot does not fit a deep link; a username never holds a hyphen, so a
+    # dot travels as one.
+    url = f"https://www.instagram.com/stories/{username}/"
+
+    assert links.post_start_payload(url) == payload
+    assert links.post_url_from_start_payload(payload) == url
+
+
+@pytest.mark.parametrize("payload", ["stories_", "stories_bad!", "stories_" + "a" * 31, "stories_a/b"])
+def test_a_stories_deep_link_that_names_no_username_is_refused(payload):
+    assert links.post_url_from_start_payload(payload) is None
+
+
+@pytest.mark.parametrize(
+    "url, text, start",
+    [
+        ("https://www.instagram.com/p/ABC123/", "Посмотреть карусель", "p_ABC123"),
+        ("https://www.instagram.com/stories/some.one/", "Посмотреть все сторис", "stories_some-one"),
+        (f"https://www.instagram.com/stories/highlights/{HIGHLIGHT_ID}/", "Посмотреть весь хайлайт", f"highlight_{HIGHLIGHT_ID}"),
+    ],
+)
+def test_the_button_under_an_inline_file_says_what_it_opens(url, text, start):
+    button = inline.carousel_keyboard(url, "nonnus_bot").inline_keyboard[0][0]
+
+    assert button.text == text
+    assert button.url == f"https://t.me/nonnus_bot?start={start}"
+
+
 def test_the_carousel_button_of_a_highlight_opens_it_in_the_bot():
     keyboard = inline.carousel_keyboard(f"https://www.instagram.com/stories/highlights/{HIGHLIGHT_ID}/", "nonnus_bot")
 
@@ -109,6 +142,9 @@ class InstagramAnswers:
         self.search = "finds"  # or "misses", or "fails"
         self.page = "finds"  # or "misses"
         self.stories_of_42 = True
+        # Whether a reel's items carry the author themselves. reels_media
+        # names the author on the reel; its items may say nothing of it.
+        self.reel_items_name_their_author = True
 
     def paths(self):
         return [url.removeprefix("https://www.instagram.com/").removeprefix("api/v1/") for url in self.asked]
@@ -129,6 +165,8 @@ class InstagramAnswers:
             if self.search == "finds":
                 users.append({"user": {"pk": "42", "username": "Some.One"}})
             return {"users": users}
+        if not self.reel_items_name_their_author:
+            items = [{key: value for key, value in item.items() if key != "user"} for item in items]
         reels = {
             f"highlight:{HIGHLIGHT_ID}": {"title": "Trip", "user": dict(USER), "items": items},
             "99": {"user": {"pk": "99", "username": "someone.else"},
@@ -212,6 +250,28 @@ def test_a_user_s_stories_are_all_of_them(instagram_answers, tmp_path):
     # answers the server 429.
     assert instagram_answers.paths() == ["web/search/topsearch/?query=some.one", "feed/reels_media/?reel_ids=42"]
     assert cache.known_account_id("some.one") == "42"
+
+
+@pytest.mark.parametrize("url", [SOME_ONE_S_STORIES, f"https://www.instagram.com/stories/highlights/{HIGHLIGHT_ID}/"])
+def test_items_that_do_not_name_their_author_take_the_reel_s(instagram_answers, tmp_path, url):
+    # Without it someone's stories were captioned with the bare link rather
+    # than "Сторис @автор": the author is what the caption is made from.
+    instagram_answers.reel_items_name_their_author = False
+
+    info = instagram.probe_post(url, tmp_path, use_cookies=False)
+
+    assert [entry["channel"] for entry in instagram.post_entries(info)] == ["some.one", "some.one"]
+
+
+def test_an_item_that_names_its_author_keeps_what_it_says():
+    story_ie = instagram.StoryIE()
+    story_ie._extract_product = lambda item, get_comments: item["user"]
+    reel = {
+        "user": {"pk": "42", "username": "some.one"},
+        "items": [{"pk": "1"}, {"pk": "2", "user": {"username": "guest"}}],
+    }
+
+    assert story_ie._items(reel) == [{"pk": "42", "username": "some.one"}, {"pk": "42", "username": "guest"}]
 
 
 def test_an_account_id_once_found_is_not_looked_up_again(instagram_answers, tmp_path):
