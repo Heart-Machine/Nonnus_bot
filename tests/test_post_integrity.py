@@ -336,6 +336,70 @@ def test_an_eleven_file_carousel_sent_from_disk_has_no_album_of_one(tmp_path):
     assert message.captions == ["caption", None]
 
 
+
+def story_items(tmp_path):
+    """Stories as they come: two videos and a photo between them."""
+    items = []
+    for name, kind in (("s0.mp4", "video"), ("s1.jpg", "photo"), ("s2.mp4", "video")):
+        path = tmp_path / name
+        path.write_bytes(b"x")
+        items.append(media.MediaItem(path, kind))
+    return items
+
+
+@pytest.fixture
+def probed_videos(monkeypatch):
+    """What ffprobe says of each video."""
+    probed = {"s0.mp4": (720, 1280, 15), "s2.mp4": (1080, 1920, 5)}
+
+    def video_send_hints(path):
+        width, height, duration = probed[path.name]
+        return {"width": width, "height": height, "duration": duration}
+
+    monkeypatch.setattr(media, "video_send_hints", video_send_hints)
+
+
+def described(media_group):
+    return [
+        (type(item).__name__, getattr(item, "width", None), getattr(item, "height", None))
+        for item in media_group
+    ]
+
+
+# Without them Telegram on a phone showed a story from an album squeezed into
+# a square, or with no picture - the desktop app, reading the stream itself,
+# showed it right. A video sent on its own has had them since Reels did the
+# same.
+HINTED_STORIES = [("InputMediaVideo", 720, 1280), ("InputMediaPhoto", None, None), ("InputMediaVideo", 1080, 1920)]
+
+
+def test_videos_uploaded_to_storage_in_an_album_carry_their_size(monkeypatch, tmp_path, probed_videos):
+    monkeypatch.setattr(config, "STORAGE_CHAT_ID", "-100")
+    albums = []
+
+    async def send_media_group(chat_id, media, **kwargs):
+        albums.append(list(media))
+        return [SimpleNamespace(video=None, photo=[SimpleNamespace(file_id=f"f{n}")]) for n in range(len(media))]
+
+    context = SimpleNamespace(bot=SimpleNamespace(send_media_group=send_media_group))
+
+    asyncio.run(delivery.upload_items_to_storage(context, story_items(tmp_path), "caption"))
+
+    assert described(albums[0]) == HINTED_STORIES
+
+
+def test_videos_sent_from_disk_in_an_album_carry_their_size(tmp_path, probed_videos):
+    albums = []
+
+    class Message:
+        async def reply_media_group(self, media, **kwargs):
+            albums.append(list(media))
+
+    asyncio.run(delivery.send_local_media_items(Message(), story_items(tmp_path), "caption"))
+
+    assert described(albums[0]) == HINTED_STORIES
+
+
 MIB = 1024 * 1024
 
 

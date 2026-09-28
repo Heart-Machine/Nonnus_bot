@@ -155,7 +155,18 @@ def upload_groups(items: list[media.MediaItem]) -> list[list[media.MediaItem]]:
     return groups
 
 
-def build_input_media(kind: str, media: Any, caption: Optional[str]) -> InputMediaPhoto | InputMediaDocument | InputMediaVideo:
+def build_input_media(
+    kind: str,
+    media: Any,
+    caption: Optional[str],
+    hints: Optional[dict[str, Any]] = None,
+) -> InputMediaPhoto | InputMediaDocument | InputMediaVideo:
+    """One file of an album. `hints` - a video's width, height and duration
+    (video_hints) - go to a video uploaded from disk, as they go to one sent on
+    its own: without them Telegram on a phone showed a story from an album
+    squeezed into a square, or with no picture at all, while the desktop app,
+    which reads the stream itself, showed it right - as it had with Reels
+    before they got the same hints. A file_id carries what the upload gave."""
     if kind == "photo":
         return InputMediaPhoto(media=media, caption=caption, parse_mode=ParseMode.HTML)
 
@@ -167,6 +178,7 @@ def build_input_media(kind: str, media: Any, caption: Optional[str]) -> InputMed
         caption=caption,
         parse_mode=ParseMode.HTML,
         supports_streaming=True,
+        **(hints or {}),
     )
 
 
@@ -355,12 +367,14 @@ async def upload_items_to_storage(
             continue
 
         sent_messages = None
+        hints = [await video_hints(item) for item in chunk]
         with ExitStack() as stack:
             media_group = [
                 build_input_media(
                     item.kind,
                     stack.enter_context(item.path.open("rb")),
                     caption if not uploaded and position == 0 else None,
+                    hints[position],
                 )
                 for position, item in enumerate(chunk)
             ]
@@ -487,12 +501,14 @@ async def send_local_media_items(message, items: list[media.MediaItem], caption:
             await send_local_item(message, chunk[0], chunk_caption)
             continue
 
+        hints = [await video_hints(item) for item in chunk]
         with ExitStack() as stack:
             media_group = [
                 build_input_media(
                     item.kind,
                     stack.enter_context(item.path.open("rb")),
                     chunk_caption if position == 0 else None,
+                    hints[position],
                 )
                 for position, item in enumerate(chunk)
             ]
