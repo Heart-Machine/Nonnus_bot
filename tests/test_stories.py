@@ -214,6 +214,46 @@ def test_a_highlight_keeps_its_photos(instagram_answers, tmp_path):
     assert info["title"] == "Trip"
 
 
+# What Instagram answers logged out for a highlight it will not show there:
+# status "ok" and nothing in `reels` (seen for a real highlight, 28 September).
+NOTHING = {"reels": {}, "status": "ok"}
+
+
+def test_a_highlight_instagram_gives_nothing_for_is_an_error_not_an_empty_one(monkeypatch, tmp_path):
+    monkeypatch.setattr(instagram.InstagramStoryIE, "_download_json", lambda self, url, *a, **k: NOTHING)
+
+    with pytest.raises(instagram.YoutubeDLError, match=f"gave nothing for highlight {HIGHLIGHT_ID}"):
+        instagram.probe_post(f"https://www.instagram.com/stories/highlights/{HIGHLIGHT_ID}/", tmp_path, use_cookies=False)
+
+
+def test_a_highlight_that_is_empty_logged_out_comes_through_with_the_session(monkeypatch, tmp_path):
+    # It used to pass logged out as a highlight with nothing in it - the
+    # session was never asked, and the user was told there was nothing.
+    cookies = tmp_path / "source" / "cookies.txt"
+    cookies.parent.mkdir()
+    cookies.write_text("# Netscape HTTP Cookie File\n", encoding="utf-8")
+    monkeypatch.setattr(config, "COOKIES_FILE", str(cookies))
+    work = tmp_path / "work"
+    work.mkdir()
+    asked = []
+
+    def download_json(self, url, *args, **kwargs):
+        with_session = bool(self.get_param("cookiefile"))
+        asked.append("session" if with_session else "logged out")
+        if not with_session:
+            return NOTHING
+        items = [story_item(STORY_PK, video=True), story_item(PHOTO_PK, video=False)]
+        return {"reels": {f"highlight:{HIGHLIGHT_ID}": {"title": "Trip", "user": dict(USER), "items": items}}}
+
+    monkeypatch.setattr(instagram.InstagramStoryIE, "_download_json", download_json)
+
+    info, used_session = instagram.probe_post_with_fallback(f"https://www.instagram.com/stories/highlights/{HIGHLIGHT_ID}/", work)
+
+    assert used_session is True
+    assert len(instagram.post_entries(info)) == 2
+    assert asked == ["logged out", "session"]
+
+
 def test_a_story_link_brings_that_one_story(instagram_answers, tmp_path):
     info = instagram.probe_post(f"https://www.instagram.com/stories/some.one/{PHOTO_PK}/", tmp_path, use_cookies=False)
 

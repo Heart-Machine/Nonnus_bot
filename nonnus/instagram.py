@@ -304,6 +304,14 @@ class StoryIE(InstagramStoryIE):
             reel = ((self._api(f"feed/reels_media/?reel_ids=highlight:{story_id}", story_id) or {}).get("reels") or {}).get(
                 f"highlight:{story_id}"
             ) or {}
+            # A highlight Instagram will not show logged out is answered with
+            # status "ok" and nothing in `reels` - checked from here - which
+            # would pass for a highlight with nothing in it, and a logged-out
+            # answer that passes is never taken to the session. So it is an
+            # error, as gallery-dl (no reels_media: log in) and instagrapi
+            # (HighlightNotFound) read the same answer.
+            if not reel.get("items"):
+                raise ExtractorError(f"Instagram gave nothing for highlight {story_id}", expected=True)
             self._keep_owner_id(reel.get("user"))
             return self.playlist_result(self._items(reel), story_id, reel.get("title"))
 
