@@ -233,7 +233,17 @@ class StoryIE(InstagramStoryIE):
         )
 
     def _items(self, reel: dict[str, Any]) -> list[dict[str, Any]]:
-        return [self._extract_product(item, get_comments=False) for item in reel.get("items") or []]
+        """The reel's items as yt-dlp builds them - each with the reel's
+        author. reels_media names the author on the reel rather than on every
+        item, and _extract_product takes the author (channel) from the item's
+        own `user`: without this someone's stories came out captioned with the
+        bare link instead of "Сторис @автор". yt-dlp's own story extractor
+        fills the items in the same way; what an item says of itself wins."""
+        owner = reel.get("user") or {}
+        return [
+            self._extract_product({**item, "user": {**owner, **(item.get("user") or {})}}, get_comments=False)
+            for item in reel.get("items") or []
+        ]
 
     @staticmethod
     def _keep_owner_id(user: Any) -> None:

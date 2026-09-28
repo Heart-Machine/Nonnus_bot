@@ -207,6 +207,13 @@ def test_start_with_a_post_payload_delivers_the_post(monkeypatch):
     assert replies == []
 
 
+def test_start_with_a_stories_payload_delivers_someone_s_stories(monkeypatch):
+    delivered, replies = run_start(monkeypatch, ["stories_some-one"])
+
+    assert delivered == ["https://www.instagram.com/stories/some.one/"]
+    assert replies == []
+
+
 def test_start_without_a_payload_explains_itself(monkeypatch):
     delivered, replies = run_start(monkeypatch, [])
 
