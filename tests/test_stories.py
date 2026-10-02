@@ -653,8 +653,9 @@ def highlight_result(count):
     }
 
 
-def slideshow_caption(slideshow):
-    return slideshow["blocks"][0]["caption"]["text"]
+def slideshow_text(slideshow):
+    """What the slideshow message says about the post: the text under the slides."""
+    return slideshow["blocks"][1]["text"]
 
 
 def test_a_carousel_is_one_slideshow_and_says_post():
@@ -664,7 +665,7 @@ def test_a_carousel_is_one_slideshow_and_says_post():
     [(part, slideshow)] = delivery.slideshow_messages("https://www.instagram.com/p/ABC123/", result)
 
     assert len(part) == 20
-    assert slideshow_caption(slideshow)[0] == "Пост "
+    assert slideshow_text(slideshow)[0] == "Пост "
 
 
 def test_a_highlight_of_95_is_two_slideshows_of_48_and_47_each_named():
@@ -673,10 +674,10 @@ def test_a_highlight_of_95_is_two_slideshows_of_48_and_47_each_named():
     assert [len(part) for part, slideshow in messages] == [48, 47]
     assert [file["file_id"] for part, slideshow in messages for file in part] == [f"f{index}" for index in range(95)]
     for part, slideshow in messages:
-        assert slideshow_caption(slideshow) == ["Хайлайт «Trip» ", {"type": "url", "text": "@some.one", "url": HIGHLIGHT_URL}]
+        assert slideshow_text(slideshow) == ["Хайлайт «Trip» ", {"type": "url", "text": "@some.one", "url": HIGHLIGHT_URL}]
         assert len(slideshow["blocks"][0]["blocks"]) == len(part)
     # The note after the author goes with the first only.
-    assert [len(slideshow["blocks"]) for part, slideshow in messages] == [2, 1]
+    assert [len(slideshow["blocks"]) for part, slideshow in messages] == [3, 2]
 
 
 @pytest.mark.parametrize(

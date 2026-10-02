@@ -241,17 +241,20 @@ def test_slideshow_keeps_every_file_in_carousel_order():
     ]
 
 
-def test_slideshow_caption_links_the_author_to_the_post():
-    caption = delivery.carousel_slideshow_message(POST_URL, cached_post(CAROUSEL))["blocks"][0]["caption"]
+def test_slideshow_names_the_post_in_the_text_under_the_slides():
+    # It used to be the slideshow's caption, which Telegram shows as a
+    # description of the photos rather than as the message's text.
+    slideshow, text = delivery.carousel_slideshow_message(POST_URL, cached_post(CAROUSEL))["blocks"]
 
-    assert caption == {"text": ["Пост ", {"type": "url", "text": "@someone", "url": POST_URL}]}
+    assert "caption" not in slideshow
+    assert text == {"type": "paragraph", "text": ["Пост ", {"type": "url", "text": "@someone", "url": POST_URL}]}
 
 
-def test_slideshow_caption_falls_back_to_the_url_without_an_author():
+def test_slideshow_text_falls_back_to_the_url_without_an_author():
     cached = {**cached_post(CAROUSEL), "title": "Instagram"}
-    caption = delivery.carousel_slideshow_message(POST_URL, cached)["blocks"][0]["caption"]
+    text = delivery.carousel_slideshow_message(POST_URL, cached)["blocks"][1]
 
-    assert caption["text"][1]["text"] == POST_URL
+    assert text["text"][1]["text"] == POST_URL
 
 
 def test_slideshow_keeps_caption_notes_as_plain_paragraphs():
@@ -260,7 +263,7 @@ def test_slideshow_keeps_caption_notes_as_plain_paragraphs():
     cached = {**cached_post(CAROUSEL), "caption": '<a href="x">@someone</a>\n\nВидео &quot;сжато&quot;.'}
     blocks = delivery.carousel_slideshow_message(POST_URL, cached)["blocks"]
 
-    assert blocks[1:] == [{"type": "paragraph", "text": 'Видео "сжато".'}]
+    assert blocks[2:] == [{"type": "paragraph", "text": 'Видео "сжато".'}]
 
 
 def test_no_slideshow_for_a_single_file():
