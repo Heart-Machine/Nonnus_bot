@@ -203,7 +203,7 @@ def caption_label(url: str, caption: str) -> str:
 
 def carousel_slideshow_message(url: str, cached_result: dict[str, Any]) -> Optional[dict[str, Any]]:
     """The whole carousel as one rich message: a slideshow of every file in
-    carousel order, with the author link as its caption.
+    carousel order, and under it the author link as text of the message.
 
     This is what gets a carousel into a chat through inline mode in one piece.
     An inline message cannot be an album, but it can be a rich message, and
@@ -228,12 +228,12 @@ def carousel_slideshow_message(url: str, cached_result: dict[str, Any]) -> Optio
     author = cached_result.get("title")
     link_text = author if author and author != "Instagram" else post_url
     label = caption_label(url, cached_result.get("caption") or "")
+    # The name of the post is a paragraph of its own, not the slideshow's
+    # caption: as that, Telegram showed it as a description of the photos
+    # rather than as what the message says.
     blocks: list[dict[str, Any]] = [
-        {
-            "type": "slideshow",
-            "blocks": slides,
-            "caption": {"text": [f"{label} ", {"type": "url", "text": link_text, "url": post_url}]},
-        }
+        {"type": "slideshow", "blocks": slides},
+        {"type": "paragraph", "text": [f"{label} ", {"type": "url", "text": link_text, "url": post_url}]},
     ]
 
     # Notes the caption picked up after the author link - that a video was
