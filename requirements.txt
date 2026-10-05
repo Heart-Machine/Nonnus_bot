@@ -20,7 +20,7 @@ idna==3.20
     # via
     #   anyio
     #   httpx
-python-dotenv==1.2.3
+python-dotenv==1.2.4
     # via -r requirements.in
 python-telegram-bot==22.8
     # via -r requirements.in
