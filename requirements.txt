@@ -20,13 +20,13 @@ idna==3.20
     # via
     #   anyio
     #   httpx
-python-dotenv==1.2.3
+python-dotenv==1.2.4
     # via -r requirements.in
 python-telegram-bot==22.8
     # via -r requirements.in
 typing-extensions==4.16.0
     # via anyio
-tzdata==2026.4
+tzdata==2026.5
     # via -r requirements.in
 yt-dlp==2026.8.19
     # via -r requirements.in
