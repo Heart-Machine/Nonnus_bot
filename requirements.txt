@@ -28,5 +28,5 @@ typing-extensions==4.16.0
     # via anyio
 tzdata==2026.5
     # via -r requirements.in
-yt-dlp==2026.8.19
+yt-dlp==2026.10.21
     # via -r requirements.in
