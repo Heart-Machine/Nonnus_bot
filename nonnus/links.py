@@ -29,11 +29,17 @@ from urllib.parse import urlparse
 # Instagram answers /s/ with a page, not a redirect, so it is decoded here.
 # The post branch goes before /s/: a post shared from the profile of someone
 # called "s" is /s/p/<code>, and the /s/ branch would stop at "/s/p".
+#
+# A username is letters, digits, underscores and dots - but not dots alone.
+# "." and ".." are path segments rather than anyone, and /stories/../ would
+# have the account looked up, with the session, at Instagram's home page
+# (StoryIE._find_account_id asks for <base>/<username>/).
+INSTAGRAM_USERNAME_PATTERN = r"(?!\.+(?![A-Za-z0-9._]))[A-Za-z0-9._]{1,30}"
 INSTAGRAM_URL_RE = re.compile(
     r"https?://(?:www\.|m\.)?(?:instagram\.com|instagr\.am)/"
     r"(?:share/(?:reels?/|p/)?[A-Za-z0-9_\-]+"
     r"|(?:[A-Za-z0-9._]{1,30}/)?(?:reel|reels|p|tv)/[A-Za-z0-9_\-]+"
-    r"|stories/[A-Za-z0-9._]{1,30}(?:/\d+)?"
+    rf"|stories/{INSTAGRAM_USERNAME_PATTERN}(?:/\d+)?"
     r"|s/[A-Za-z0-9_\-+=]+)/?"
     r"(?:\?[^\s.,!?;:()\[\]{}<>'\"]+)?",
     re.IGNORECASE,
@@ -142,7 +148,7 @@ START_PAYLOAD_POST_TYPES = {"p", "reel", "reels", "tv"}
 INSTAGRAM_SHORTCODE_RE = re.compile(r"[A-Za-z0-9_-]+")
 
 
-INSTAGRAM_USERNAME_RE = re.compile(r"[A-Za-z0-9._]{1,30}")
+INSTAGRAM_USERNAME_RE = re.compile(INSTAGRAM_USERNAME_PATTERN)
 
 
 def post_start_payload(url: str) -> Optional[str]:

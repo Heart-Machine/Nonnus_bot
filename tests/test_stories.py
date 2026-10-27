@@ -95,6 +95,25 @@ def test_a_stories_deep_link_that_names_no_username_is_refused(payload):
     assert links.post_url_from_start_payload(payload) is None
 
 
+@pytest.mark.parametrize("username", [".", "..", "..."])
+def test_dots_alone_are_nobody_s_username(username):
+    # "." and ".." are path segments: /stories/../ would have the account
+    # looked up, with the session, at Instagram's home page. Not a link, and
+    # not a deep link either - that is where a dot is a hyphen.
+    for text in (f"https://www.instagram.com/stories/{username}/", f"https://www.instagram.com/stories/{username}/{STORY_PK}"):
+        assert links.find_instagram_url(f"глянь {text}") is None
+    assert links.post_url_from_start_payload("stories_" + username.replace(".", "-")) is None
+
+
+@pytest.mark.parametrize("username", ["a.b", "_.._", "__", "a" * 30])
+def test_a_username_with_dots_among_other_characters_still_is_one(username):
+    url = f"https://www.instagram.com/stories/{username}/"
+
+    assert links.find_instagram_url(url) == url
+    assert links.story_kind(url) == links.STORIES
+    assert links.post_url_from_start_payload(links.post_start_payload(url)) == url
+
+
 @pytest.mark.parametrize(
     "url, text, start",
     [
