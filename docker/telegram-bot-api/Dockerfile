@@ -8,7 +8,7 @@
 # fixes the TDLib submodule it builds with. To move to a newer server, take
 # the latest commit of https://github.com/tdlib/telegram-bot-api - the build
 # below refuses one that knows no rich messages.
-FROM debian:13-slim@sha256:a99cfc517144bc59b1978475ec53b46ecabec7e43635402ee5b77cc54cd1b20a AS build
+FROM debian:13-slim@sha256:f6b08b09a05725f9431502d3b5714f5c4576e82c1a84fa1debe0c24a7e0c3ec4 AS build
 
 ARG TELEGRAM_BOT_API_COMMIT=e3e9dd8e5b3d7ab8537cd5a10dc31d5ffa8f82d1
 
@@ -25,7 +25,7 @@ RUN git clone https://github.com/tdlib/telegram-bot-api.git . \
     && cmake --build build --target install -j "$(nproc)" \
     && strip /opt/telegram-bot-api/bin/telegram-bot-api
 
-FROM debian:13-slim@sha256:a99cfc517144bc59b1978475ec53b46ecabec7e43635402ee5b77cc54cd1b20a
+FROM debian:13-slim@sha256:f6b08b09a05725f9431502d3b5714f5c4576e82c1a84fa1debe0c24a7e0c3ec4
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends libssl3t64 zlib1g \
